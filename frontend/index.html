@@ -92,11 +92,16 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+let consecutiveFailures = 0;
+const MAX_CONSECUTIVE_FAILURES = 5; // tolerate transient network blips during the multi-minute poll
+
 async function pollJob(jobId) {
   try {
     const res = await fetch(`${API}/jobs/${jobId}`);
     if (!res.ok) throw new Error("Job not found");
     const job = await res.json();
+    consecutiveFailures = 0;
+    errorEl.textContent = ""; // clear any stale error from an earlier transient blip
     setStatus(job.status, job.status);
 
     if (job.status === "done") {
@@ -111,9 +116,13 @@ async function pollJob(jobId) {
       errorEl.textContent = job.error || "Job failed";
     }
   } catch (err) {
-    clearInterval(pollHandle);
-    submitBtn.disabled = false;
-    errorEl.textContent = err.message;
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      clearInterval(pollHandle);
+      submitBtn.disabled = false;
+      errorEl.textContent = `Lost connection while checking status: ${err.message}`;
+    }
+    // otherwise: transient blip, keep polling silently
   }
 }
 </script>
