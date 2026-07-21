@@ -2,6 +2,7 @@
 including the ' ' (space) blank placeholder. Not a full test suite —
 just enough to catch logic bugs before this goes to Claude Code."""
 
+import io
 import sys
 from pathlib import Path
 
@@ -238,6 +239,44 @@ with tempfile.TemporaryDirectory() as tmpdir:
     for desc, passed in regression_checks:
         print(f"  [{'x' if passed else ' '}] {desc}")
     checks.extend(regression_checks)
+
+# --- Column validation checks ---
+# Confirms validate_inputs() correctly reports missing vs. extra columns
+# per-file, and only raises when something REQUIRED is actually missing.
+from mtr_analysis import validate_inputs, ColumnValidationError, REQUIRED_MTR_CSV_COLUMNS, REQUIRED_CONSIGNMENT_COLUMNS
+
+_bad_cols = [c for c in REQUIRED_MTR_CSV_COLUMNS if c != "Stamp Status"] + ["Weird New Field"]
+_bad_mtr = pd.DataFrame([["x"] * len(_bad_cols)], columns=_bad_cols).to_csv(index=False).encode()
+
+_ok_cons_cols = REQUIRED_CONSIGNMENT_COLUMNS + ["Vehicle"]
+_ok_cons_df = pd.DataFrame([["y"] * len(_ok_cons_cols)], columns=_ok_cons_cols)
+_cons_buf = io.BytesIO()
+with pd.ExcelWriter(_cons_buf, engine="xlsxwriter") as _w:
+    _ok_cons_df.to_excel(_w, sheet_name="Consignment Report", index=False)
+
+validation_checks = []
+try:
+    validate_inputs(_bad_mtr, _cons_buf.getvalue())
+    validation_checks.append(("validate_inputs raises on missing required column", False))
+except ColumnValidationError as e:
+    validation_checks.append(("validate_inputs raises on missing required column", True))
+    validation_checks.append(("error report flags 'Stamp Status' as missing", "Stamp Status" in e.report["Raw MTR CSV"]["missing"]))
+    validation_checks.append(("error report flags 'Weird New Field' as extra", "Weird New Field" in e.report["Raw MTR CSV"]["extra"]))
+    validation_checks.append(("error report does NOT flag consignment as missing anything (extra-only is fine)", e.report["AT Consignment Report"]["missing"] == []))
+    validation_checks.append(("error message mentions the file label", "[Raw MTR CSV]" in str(e)))
+
+_ok_mtr_df = pd.DataFrame([["x"] * len(REQUIRED_MTR_CSV_COLUMNS)], columns=REQUIRED_MTR_CSV_COLUMNS)
+_ok_mtr = _ok_mtr_df.to_csv(index=False).encode()
+try:
+    report = validate_inputs(_ok_mtr, _cons_buf.getvalue())
+    validation_checks.append(("validate_inputs passes (no exception) when all required columns present", True))
+except ColumnValidationError:
+    validation_checks.append(("validate_inputs passes (no exception) when all required columns present", False))
+
+print(f"\n--- Column validation checks ---")
+for desc, passed in validation_checks:
+    print(f"  [{'x' if passed else ' '}] {desc}")
+checks.extend(validation_checks)
 
 print(f"\n{'=' * 50}")
 print(f"ABSOLUTE FINAL: {'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} total checks passed")

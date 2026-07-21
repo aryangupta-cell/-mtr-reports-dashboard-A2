@@ -167,6 +167,130 @@ PLANTS_CODE_COL = "Plant Code"
 
 
 # =============================================================================
+# Input validation — catches a mismatched/renamed file's headers up front,
+# before spending minutes running the pipeline only to hit a KeyError deep
+# inside. Reports exactly which file, which required columns are missing,
+# and which columns are present but unrecognized (informational — extra
+# columns are tolerated, not an error, per existing business decision).
+# =============================================================================
+
+# The raw input columns build_analysis_columns()/reorder_to_final_layout()
+# actually require from the MTR CSV — i.e. final_order below MINUS the
+# NEW_* derived columns (which don't exist until this pipeline adds them).
+# Kept as an explicit list rather than computed from final_order so this
+# validation doesn't depend on reorder_to_final_layout()'s internals — if
+# you add a required raw column there, add it here too.
+REQUIRED_MTR_CSV_COLUMNS = [
+    "Trip ID", "Vehicle No.", "Vehicle Type", "SAP PGI No", "PGI Date & Time",
+    "SAP Order No", "DI No", "Transporter Name ", "Transporter Code", "Zone",
+    "Yard IN", "Yard Out", "Yard detention", "Plant name", "Plant Code",
+    "Plant Entry", "Plant Exit", "Plant Detention", "Destination Code",
+    "Destination", "Customer Name", "Dest Entry Time", "Dest Exit Time",
+    "Dest Detention", "Destination Proximity End Time", "Destination Ageing",
+    "Onward Duration", "Customer Segment", "Compliance Status", "Depot",
+    "Route Name", "Halt", "Onward Status", "Stamp Status", "Reject Reason",
+    "Sap Lead Dist", "GPS Distance", "AI Repaired Distance", "Geofence Hit/miss",
+    "Mother Geofence Start Time", "Mother Geofence End Time",
+    "Mother Geofence Detention", "Billing Status",
+]
+
+REQUIRED_CONSIGNMENT_COLUMNS = [
+    CONS_SAP_PGI_NO, CONS_CITY_CODE, CONS_DESTINATION, CONS_SAP_LEAD_DIST, CONS_PLANT_CODE,
+]
+
+REQUIRED_XSWIFT_DASHBOARD_COLUMNS = ["Vehicle No", "Vehicle Status"]
+REQUIRED_AT_DASHBOARD_COLUMNS = ["Company Name", "Vehicle"]
+
+
+class ColumnValidationError(ValueError):
+    """Raised by validate_inputs() with a structured, per-file report of
+    missing/extra columns — str(exc) is a human-readable summary suitable
+    for surfacing directly to the dashboard user."""
+
+    def __init__(self, report: dict[str, dict[str, list[str]]]):
+        self.report = report
+        lines = ["Uploaded file(s) don't match the expected column structure:"]
+        for file_label, info in report.items():
+            if not info["missing"] and not info["extra"]:
+                continue
+            lines.append(f"\n[{file_label}]")
+            if info["missing"]:
+                lines.append(f"  MISSING required columns: {info['missing']}")
+            if info["extra"]:
+                lines.append(f"  Extra/unrecognized columns: {info['extra']}")
+        super().__init__("\n".join(lines))
+
+
+def _peek_columns(source, **read_kwargs) -> list[str]:
+    """Reads just the header row of a CSV or XLSX source (path or bytes-like
+    file object) — cheap, doesn't load the actual data rows."""
+    if isinstance(source, io.BytesIO) or hasattr(source, "read"):
+        source.seek(0)
+    if "sheet_name" in read_kwargs:
+        df = pd.read_excel(source, nrows=0, **read_kwargs)
+    else:
+        df = pd.read_csv(source, nrows=0, **read_kwargs)
+    if isinstance(source, io.BytesIO) or hasattr(source, "seek"):
+        source.seek(0)
+    return list(df.columns)
+
+
+def _check_columns(file_label: str, actual: list[str], required: list[str],
+                    report: dict[str, dict[str, list[str]]]) -> None:
+    missing = [c for c in required if c not in actual]
+    extra = [c for c in actual if c not in required]
+    report[file_label] = {"missing": missing, "extra": extra}
+
+
+def validate_inputs(
+    mtr_csv,
+    consignment_xlsx,
+    xswift_live_dashboard_xlsx=None,
+    at_live_dashboard_xlsx=None,
+) -> dict[str, dict[str, list[str]]]:
+    """Checks each file's actual headers against what the pipeline requires.
+    Raises ColumnValidationError (with the full per-file report) if any
+    REQUIRED column is missing anywhere. Extra/unrecognized columns are
+    reported but never raise — they're already handled (kept, not dropped)
+    by reorder_to_final_layout().
+
+    Accepts the same input shapes as run_in_memory()/run() — bytes, a
+    Path, or an open file-like object.
+    """
+    report: dict[str, dict[str, list[str]]] = {}
+
+    mtr_src = io.BytesIO(mtr_csv) if isinstance(mtr_csv, bytes) else mtr_csv
+    _check_columns("Raw MTR CSV", _peek_columns(mtr_src), REQUIRED_MTR_CSV_COLUMNS, report)
+
+    cons_src = io.BytesIO(consignment_xlsx) if isinstance(consignment_xlsx, bytes) else consignment_xlsx
+    _check_columns(
+        "AT Consignment Report",
+        _peek_columns(cons_src, sheet_name="Consignment Report"),
+        REQUIRED_CONSIGNMENT_COLUMNS, report,
+    )
+
+    if xswift_live_dashboard_xlsx:
+        xswift_src = io.BytesIO(xswift_live_dashboard_xlsx) if isinstance(xswift_live_dashboard_xlsx, bytes) else xswift_live_dashboard_xlsx
+        _check_columns(
+            "XSwift Live Trip Dashboard",
+            _peek_columns(xswift_src, sheet_name="Trip Dashboard", skiprows=2),
+            REQUIRED_XSWIFT_DASHBOARD_COLUMNS, report,
+        )
+
+    if at_live_dashboard_xlsx:
+        at_src = io.BytesIO(at_live_dashboard_xlsx) if isinstance(at_live_dashboard_xlsx, bytes) else at_live_dashboard_xlsx
+        _check_columns(
+            "AT Live Dashboard",
+            _peek_columns(at_src, sheet_name="dashboard"),
+            REQUIRED_AT_DASHBOARD_COLUMNS, report,
+        )
+
+    if any(info["missing"] for info in report.values()):
+        raise ColumnValidationError(report)
+    return report
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 
@@ -791,6 +915,11 @@ def run(cfg: Config) -> None:
     """
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
+    validate_inputs(
+        cfg.mtr_csv, cfg.consignment_xlsx,
+        cfg.xswift_live_dashboard_xlsx, cfg.at_live_dashboard_xlsx,
+    )
+
     primary_plant_codes = load_primary_plant_codes(cfg.primary_plants_xlsx)
     primary_plant_codes = (primary_plant_codes - cfg.task1_exclude_plant_codes) | cfg.task1_include_extra_plant_codes
 
@@ -862,6 +991,8 @@ def run_in_memory(
     are modified here. Returns {output_filename: file_bytes}.
     """
     log.info("Running pipeline in-memory (no disk writes)")
+
+    validate_inputs(mtr_csv, consignment_xlsx, xswift_live_dashboard_xlsx, at_live_dashboard_xlsx)
 
     primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
     primary_plant_codes = (
