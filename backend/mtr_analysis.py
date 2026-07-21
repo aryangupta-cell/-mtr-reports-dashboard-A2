@@ -807,7 +807,7 @@ def run(cfg: Config) -> None:
     )
     analyzed = reorder_to_final_layout(analyzed)
     pivots_by_sheet = build_all_pivots(analyzed)
-    write_xlsx("mtr - analysis", analyzed, pivots_by_sheet,
+    write_xlsx(f"mtr - {cfg.run_date_label}", analyzed, pivots_by_sheet,
                cfg.output_dir / f"MTR_Analysis_-_{cfg.run_date_label}.xlsx")
 
     # --- Output 2: "Output Trip creation - Trip Repush" ---
@@ -890,7 +890,7 @@ def run_in_memory(
     analyzed = reorder_to_final_layout(analyzed)
     pivots_by_sheet = build_all_pivots(analyzed)
     buf = io.BytesIO()
-    write_xlsx("mtr - analysis", analyzed, pivots_by_sheet, buf)
+    write_xlsx(f"mtr - {run_date_label}", analyzed, pivots_by_sheet, buf)
     outputs[f"MTR_Analysis_-_{run_date_label}.xlsx"] = buf.getvalue()
 
     # --- Output 2: "Output Trip creation - Trip Repush" ---
