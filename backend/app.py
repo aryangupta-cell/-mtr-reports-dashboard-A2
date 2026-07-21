@@ -27,7 +27,9 @@ restriction is specific to the COMPANY server (server_worker.py, which
 this file never touches), not Render.
 """
 
+import os
 import shutil
+import subprocess
 import threading
 import time
 import zipfile
@@ -159,6 +161,35 @@ async def download_output(job_id: str, filename: str):
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/api/debug/keycheck")
+async def debug_keycheck():
+    """TEMPORARY diagnostic endpoint — remove once the SSH key issue is
+    resolved. Never returns the key itself, only its fingerprint/size/
+    permissions, to help diagnose why the remote server rejects it."""
+    key_path = os.environ.get("SSH_KEY_PATH", "/etc/secrets/render_to_aterp")
+    info = {"key_path": key_path, "exists": Path(key_path).exists()}
+    if info["exists"]:
+        st = Path(key_path).stat()
+        info["size_bytes"] = st.st_size
+        info["permissions"] = oct(st.st_mode)[-3:]
+        try:
+            with open(key_path, "rb") as f:
+                raw = f.read()
+            info["contains_crlf"] = b"\r\n" in raw
+            info["ends_with_newline"] = raw.endswith(b"\n")
+            info["last_20_bytes_hex"] = raw[-20:].hex()
+        except Exception as exc:
+            info["read_error"] = str(exc)
+
+        fp = subprocess.run(
+            ["ssh-keygen", "-lf", key_path], capture_output=True, text=True, timeout=10
+        )
+        info["fingerprint_stdout"] = fp.stdout.strip()
+        info["fingerprint_stderr"] = fp.stderr.strip()
+        info["fingerprint_returncode"] = fp.returncode
+    return info
 
 
 def _cleanup_loop():
