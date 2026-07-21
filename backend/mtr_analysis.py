@@ -22,10 +22,10 @@ Instead this script:
      O(1) dict builds + one O(n) `.map()` each.
   3. Computes every derived column as a vectorized pandas operation
      (np.select / np.where), not a per-cell Python loop.
-  4. Writes the output with xlsxwriter in constant_memory mode, which
-     streams rows to disk instead of holding the whole workbook in
-     RAM (openpyxl does not have an equivalent streaming write mode
-     for regular sheets).
+  4. Writes the output with plain xlsxwriter (NOT constant_memory mode
+     — see write_xlsx() docstring for why: constant_memory
+     silently corrupts data with pandas' to_excel and was caught late,
+     shipping broken output for a while. Removed entirely.).
 
 BLANK HANDLING (IMPORTANT, CONFIRMED FROM REAL DATA)
 -------------------------------------------------------
@@ -77,19 +77,22 @@ class Config:
     consignment_xlsx: Path             # AT Consignment Report, e.g. "reports_consignts - 20 July.xlsx"
     primary_plants_xlsx: Path          # "Primary Plants List.xlsx"
 
-    # Task 1 inputs (optional — only needed if you also run run_task1_mapping,
-    # currently ON HOLD). NAMES CORRECTED 2026-07-20 — these were previously
-    # swapped: "Trip Dashboard_export...xlsx" is XSwift's Live Trip Dashboard
-    # export, NOT AT's. "dashboard_export...xlsx" is AT's Live Trip Dashboard
-    # export (AT's platform serves many client companies beyond UTCL, so this
-    # file needs the primary-plant filter applied same as everything else).
+    # Task 1 inputs (optional — only needed to also produce Mapping issue).
+    # NAMES CORRECTED 2026-07-20 — these were previously swapped:
+    # "Trip Dashboard_export...xlsx" is XSwift's Live Trip Dashboard export,
+    # NOT AT's. "dashboard_export...xlsx" is AT's Live Trip Dashboard export
+    # (AT's platform serves many client companies beyond UTCL, so this file
+    # needs the primary-plant filter applied same as everything else).
     xswift_live_dashboard_xlsx: Path | None = None  # "Trip Dashboard_export....xlsx" — XSwift
     at_live_dashboard_xlsx: Path | None = None       # "dashboard_export....xlsx" — AT
 
     # ---- Outputs ----
+    # xlsx ONLY (2026-07-20, explicit business requirement) — no CSV, no
+    # separate output_basename; filenames match the real files exactly
+    # (see run()): "MTR_Analysis_-_<date>.xlsx", "Trip_Repush_-_<date>.xlsx",
+    # "Mapping_issue_-_<date>.xlsx".
     output_dir: Path = Path("./output")
-    output_basename: str = "MTR_Analysis"   # -> MTR_Analysis.xlsx / .csv
-    run_date_label: str = "output"          # tab name for Trip Repush, e.g. "20 July"
+    run_date_label: str = "output"          # e.g. "20 July" — used in every output filename and as the Trip Repush tab name
 
     # ---- Business thresholds (confirmed) ----
     sap_ai_ok_band: tuple[int, int] = (-20, 20)   # SAP-AI "0 to 20" band
@@ -100,8 +103,7 @@ class Config:
     task1_include_extra_plant_codes: set[str] = field(default_factory=set)
 
     # ---- Performance ----
-    csv_chunksize: int | None = None   # set e.g. 50_000 if RAM is constrained
-    write_xlsx: bool = True            # also write .xlsx (slower); CSV is always written
+    csv_chunksize: int | None = None   # set e.g. 50_000 if RAM is constrained (still useful for READING the large input CSV, unrelated to output format)
 
 
 # =============================================================================
@@ -681,65 +683,64 @@ def run_task1_mapping(cfg: Config, primary_plant_companies: set[str]) -> dict[st
 # Output writers
 # =============================================================================
 
-def write_csv(df: pd.DataFrame, path: Path) -> None:
-    log.info("Writing CSV to %s (%d rows)", path, len(df))
-    df.to_csv(path, index=False)
-    log.info("CSV written: %.1f MB", path.stat().st_size / 1e6)
+# Columns confirmed (from the real file's styles.xml, header row s="6" —
+# fill index 33 = FFFF00, pure yellow) to have a yellow header background.
+# NOTE: "Date and time" is a derived column too but is NOT in this list —
+# confirmed its header uses the normal style (s="1"), not yellow.
+YELLOW_HEADER_COLUMNS = {
+    NEW_TRANSPORTER_REMARK, NEW_YARD_DETENTION_SLAB, NEW_ZONE_REMARK,
+    NEW_PLANT_DETENTION_SLAB, NEW_AT_DEST_NAME, NEW_DEST_MATCH,
+    NEW_DEST_DETENTION_SLAB, NEW_AT_SAP_LEAD_DIST, NEW_MATCH,
+    NEW_AI_CHECK, NEW_SAP_AI, NEW_SAP_AI_REMARK,
+}
+
+# Columns confirmed (from real data-row cell styles) to use Excel's
+# datetime number format (numFmtId 22, "m/d/yy h:mm").
+DATETIME_FORMAT_COLUMNS = {"PGI Date & Time", NEW_DATE_AND_TIME, "Plant Entry", "Plant Exit"}
+
+# Column confirmed to use Excel's time-duration format (numFmtId 20, "h:mm").
+DURATION_FORMAT_COLUMNS = {"Plant Detention"}
 
 
-def write_xlsx_streaming(main_sheet_name: str, main_df: pd.DataFrame,
-                          pivots_by_sheet: dict[str, list[tuple[str, pd.DataFrame]]],
-                          path: Path) -> None:
-    """Streams rows with xlsxwriter constant_memory mode — required
-    for a 280k-row sheet. Do NOT switch this to openpyxl for the main
-    data sheet; openpyxl holds the whole worksheet in memory and will
-    be dramatically slower / may run out of RAM at this size.
+def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
+                pivots_by_sheet: dict[str, list[tuple[str, pd.DataFrame]]],
+                path: Path) -> None:
+    """CORRECTED 2026-07-20 — this function was previously named
+    write_xlsx_streaming() and used xlsxwriter's `constant_memory: True`
+    option. That option SILENTLY CORRUPTS DATA when combined with
+    pandas' `DataFrame.to_excel()`: confirmed via isolated repro — even
+    a trivial 3-column, 100-row DataFrame with constant_memory=True
+    writes only the FIRST column correctly and leaves every other
+    column blank, with no error or warning. This shipped a real MTR
+    Analysis run with a 2.5MB xlsx (vs. the correct ~200MB) containing
+    only Trip ID values before it was caught. constant_memory is now
+    NOT used anywhere in this file — do not re-add it.
+
+    Practical consequence: writing a 281k-row x 53-column sheet without
+    constant_memory holds more of the workbook in memory while writing
+    (openpyxl/xlsxwriter's normal mode), which is slower and more
+    memory-hungry than the (broken) streaming mode was. This is fine on
+    a machine with a few GB of free RAM — which is what the company
+    server this now runs on provides; it would NOT have been fine on
+    Render's free 512MB tier, but that's no longer where this executes.
 
     Pivot sheets ("Sheet1"/"Sheet2") each hold multiple titled pivot
     tables stacked vertically with a blank row between them, matching
     the real file's layout (multiple PivotTables per worksheet).
+
+    FORMATTING (2026-07-20, confirmed from the real file's styles.xml —
+    not a guess): the 12 columns in YELLOW_HEADER_COLUMNS get a yellow
+    (#FFFF00) header background, matching the business contact's own
+    notes ("all the columns highlighted with yellow header added"). Date
+    columns get proper Excel datetime formatting; Plant Detention gets
+    Excel's time-duration format. Every other column is left as Excel's
+    general default — do not add formatting beyond what's listed here
+    without re-confirming against the real file first.
     """
-    log.info("Writing XLSX to %s (constant_memory mode)", path)
-    with pd.ExcelWriter(path, engine="xlsxwriter", engine_kwargs={"options": {"constant_memory": True}}) as writer:
-        for sheet_name, pivots in pivots_by_sheet.items():
-            row_cursor = 0
-            worksheet = None
-            for title, pivot_df in pivots:
-                # write a title row, then the pivot table right below it
-                title_df = pd.DataFrame([[title]])
-                title_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False,
-                                   startrow=row_cursor)
-                row_cursor += 1
-                pivot_df.to_excel(writer, sheet_name=sheet_name, startrow=row_cursor)
-                row_cursor += len(pivot_df) + pivot_df.columns.nlevels + 3  # + gap before next table
-            if not pivots:
-                pd.DataFrame().to_excel(writer, sheet_name=sheet_name)
+    log.info("Writing XLSX to %s", path)
+    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
+        workbook = writer.book
 
-        main_df.to_excel(writer, sheet_name=main_sheet_name[:31], index=False)
-    log.info("XLSX written: %.1f MB", path.stat().st_size / 1e6)
-
-
-# =============================================================================
-# In-memory (RAM-only) I/O — for environments where the pipeline must not
-# write anything to disk, even temporarily (e.g. a shared company server
-# where we're only permitted to use CPU/RAM, not storage).
-#
-# These mirror the disk-based writers above byte-for-byte in OUTPUT CONTENT
-# — same to_csv/to_excel calls, same xlsxwriter constant_memory mode — the
-# only difference is the target is an io.BytesIO buffer instead of a Path.
-# None of the actual business logic (build_analysis_columns,
-# run_task1_trip_repush, run_task1_mapping, reorder_to_final_layout,
-# build_all_pivots) is touched by this section at all.
-# =============================================================================
-
-def _write_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def _write_xlsx_bytes(main_sheet_name: str, main_df: pd.DataFrame,
-                       pivots_by_sheet: dict[str, list[tuple[str, pd.DataFrame]]]) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter", engine_kwargs={"options": {"constant_memory": True}}) as writer:
         for sheet_name, pivots in pivots_by_sheet.items():
             row_cursor = 0
             for title, pivot_df in pivots:
@@ -752,15 +753,91 @@ def _write_xlsx_bytes(main_sheet_name: str, main_df: pd.DataFrame,
             if not pivots:
                 pd.DataFrame().to_excel(writer, sheet_name=sheet_name)
 
-        main_df.to_excel(writer, sheet_name=main_sheet_name[:31], index=False)
-    return buf.getvalue()
+        main_sheet_name = main_sheet_name[:31]
+        main_df.to_excel(writer, sheet_name=main_sheet_name, index=False)
+        worksheet = writer.sheets[main_sheet_name]
+
+        yellow_header_format = workbook.add_format({"bg_color": "#FFFF00", "bold": False})
+        datetime_format = workbook.add_format({"num_format": "m/d/yy h:mm"})
+        duration_format = workbook.add_format({"num_format": "h:mm"})
+
+        for col_idx, col_name in enumerate(main_df.columns):
+            if col_name in YELLOW_HEADER_COLUMNS:
+                worksheet.write(0, col_idx, col_name, yellow_header_format)
+            if col_name in DATETIME_FORMAT_COLUMNS:
+                worksheet.set_column(col_idx, col_idx, None, datetime_format)
+            elif col_name in DURATION_FORMAT_COLUMNS:
+                worksheet.set_column(col_idx, col_idx, None, duration_format)
+
+    # path may be a real file path (CLI/disk mode) or an in-memory buffer
+    # (see run_in_memory() below) — size it either way without touching
+    # any of the actual write logic above.
+    size_bytes = path.stat().st_size if hasattr(path, "stat") else path.tell()
+    log.info("XLSX written: %.1f MB", size_bytes / 1e6)
 
 
-def _write_single_sheet_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
-    return buf.getvalue()
+# =============================================================================
+# Main
+# =============================================================================
+
+def run(cfg: Config) -> None:
+    """OUTPUT FORMAT CHANGED (2026-07-20, explicit business requirement):
+    xlsx ONLY, one file per output, no CSV. The business contact needs
+    the output to be "same to same" as the 3 real files she works with —
+    CSV was never part of that (it was added earlier purely as a
+    cheaper/faster intermediate while chasing the constant_memory bug,
+    which is now fixed — CSV was a workaround for a problem that no
+    longer exists). Do not reintroduce CSV output without being asked.
+    """
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+
+    primary_plant_codes = load_primary_plant_codes(cfg.primary_plants_xlsx)
+    primary_plant_codes = (primary_plant_codes - cfg.task1_exclude_plant_codes) | cfg.task1_include_extra_plant_codes
+
+    # Load the full Consignment Report once — used for both the MTR Analysis
+    # lookups AND Trip Repush (avoids reading this 60MB+ file twice).
+    consignment_full = load_consignment_report_full(cfg.consignment_xlsx)
+    city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
+
+    mtr = load_raw_mtr(cfg.mtr_csv, chunksize=cfg.csv_chunksize)
+
+    # --- Output 1: "Output Final - MTR Analysis" ---
+    analyzed = build_analysis_columns(
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+    )
+    analyzed = reorder_to_final_layout(analyzed)
+    pivots_by_sheet = build_all_pivots(analyzed)
+    write_xlsx("mtr - analysis", analyzed, pivots_by_sheet,
+               cfg.output_dir / f"MTR_Analysis_-_{cfg.run_date_label}.xlsx")
+
+    # --- Output 2: "Output Trip creation - Trip Repush" ---
+    # Real file keeps one tab per run-date in an accumulating workbook
+    # (e.g. "18 June", "20 July" both present). This writes a fresh
+    # single-tab file per run instead of appending — if the accumulating
+    # history matters in practice, extend this to open the existing
+    # workbook with openpyxl (NOT xlsxwriter, which can't append to an
+    # existing file) and add a new tab rather than overwrite.
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    with pd.ExcelWriter(cfg.output_dir / f"Trip_Repush_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
+        trip_repush.to_excel(writer, sheet_name=cfg.run_date_label[:31], index=False)
+
+    # --- Output 3: "Output Mapping issue" ---
+    # ONE workbook, TWO tabs ("Not in AT", "Not in Swift") — matches the
+    # real file's structure. Produces a WIDER candidate list than the
+    # real file (100% recall confirmed, precision not fully resolved —
+    # see run_task1_mapping() docstring); this is a deliberate, documented
+    # tradeoff, not a bug.
+    if cfg.xswift_live_dashboard_xlsx and cfg.at_live_dashboard_xlsx:
+        primary_plant_companies = load_primary_plant_companies(cfg.primary_plants_xlsx)
+        task1_results = run_task1_mapping(cfg, primary_plant_companies)
+        if task1_results:
+            with pd.ExcelWriter(cfg.output_dir / f"Mapping_issue_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
+                for name, df in task1_results.items():
+                    df.to_excel(writer, sheet_name=name[:31], index=False)
+    else:
+        log.info("Mapping issue inputs not provided — skipping (pass --xswift-live-dashboard-xlsx and --at-live-dashboard-xlsx to run it).")
+
+    log.info("Pipeline complete. 3 xlsx files written to %s", cfg.output_dir)
 
 
 def run_in_memory(
@@ -772,16 +849,17 @@ def run_in_memory(
     at_live_dashboard_xlsx: bytes | None = None,
     task1_exclude_plant_codes: set[str] | None = None,
     task1_include_extra_plant_codes: set[str] | None = None,
-    write_xlsx: bool = True,
 ) -> dict[str, bytes]:
-    """Same pipeline, same inputs, same outputs as run() — the only
-    difference is every input/output is raw bytes in RAM, never a path on
-    disk. Returns {output_filename: file_bytes}.
+    """Same pipeline, same inputs, same 3 xlsx outputs as run() — every
+    input/output is raw bytes in RAM instead of a path on disk (needed
+    because this now runs on a shared company server that must not write
+    anything to disk, not even temporarily).
 
-    Reuses build_analysis_columns / run_task1_trip_repush /
-    run_task1_mapping / reorder_to_final_layout / build_all_pivots exactly
-    as-is — those are the functions with the actual confirmed business
-    logic, and none of them are modified here.
+    Mirrors run()'s exact sequence of calls. Reuses build_analysis_columns
+    / run_task1_trip_repush / run_task1_mapping / reorder_to_final_layout /
+    build_all_pivots / write_xlsx exactly as-is — none of those (the
+    functions carrying the actual confirmed business logic and formatting)
+    are modified here. Returns {output_filename: file_bytes}.
     """
     log.info("Running pipeline in-memory (no disk writes)")
 
@@ -796,8 +874,8 @@ def run_in_memory(
 
     mtr = load_raw_mtr(io.BytesIO(mtr_csv))
 
-    # Config is only used here to carry business-rule thresholds through to
-    # build_analysis_columns() — its path fields are unused in this path.
+    # Config only carries business-rule thresholds through to
+    # build_analysis_columns() here — its path fields are unused.
     cfg = Config(
         mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
         run_date_label=run_date_label,
@@ -805,92 +883,40 @@ def run_in_memory(
 
     outputs: dict[str, bytes] = {}
 
+    # --- Output 1: "Output Final - MTR Analysis" ---
     analyzed = build_analysis_columns(
         mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
     )
     analyzed = reorder_to_final_layout(analyzed)
-    outputs[f"{cfg.output_basename}.csv"] = _write_csv_bytes(analyzed)
-    if write_xlsx:
-        pivots_by_sheet = build_all_pivots(analyzed)
-        outputs[f"{cfg.output_basename}.xlsx"] = _write_xlsx_bytes("mtr - analysis", analyzed, pivots_by_sheet)
+    pivots_by_sheet = build_all_pivots(analyzed)
+    buf = io.BytesIO()
+    write_xlsx("mtr - analysis", analyzed, pivots_by_sheet, buf)
+    outputs[f"MTR_Analysis_-_{run_date_label}.xlsx"] = buf.getvalue()
 
+    # --- Output 2: "Output Trip creation - Trip Repush" ---
     trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
-    outputs[f"Trip_Repush_{run_date_label}.csv"] = _write_csv_bytes(trip_repush)
-    if write_xlsx:
-        outputs[f"Trip_Repush_{run_date_label}.xlsx"] = _write_single_sheet_xlsx_bytes(
-            trip_repush, run_date_label
-        )
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
+    outputs[f"Trip_Repush_-_{run_date_label}.xlsx"] = buf.getvalue()
 
+    # --- Output 3: "Output Mapping issue" ---
     if xswift_live_dashboard_xlsx and at_live_dashboard_xlsx:
         primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
         cfg.xswift_live_dashboard_xlsx = io.BytesIO(xswift_live_dashboard_xlsx)
         cfg.at_live_dashboard_xlsx = io.BytesIO(at_live_dashboard_xlsx)
         task1_results = run_task1_mapping(cfg, primary_plant_companies)
-        for name, df in task1_results.items():
-            outputs[f"Mapping_issue_{name.replace(' ', '_')}.csv"] = _write_csv_bytes(df)
+        if task1_results:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                for name, df in task1_results.items():
+                    df.to_excel(writer, sheet_name=name[:31], index=False)
+            outputs[f"Mapping_issue_-_{run_date_label}.xlsx"] = buf.getvalue()
     else:
         log.info("Mapping issue inputs not provided — skipping.")
 
-    log.info("Pipeline complete (in-memory). %d output files.", len(outputs))
+    log.info("Pipeline complete (in-memory). %d xlsx files.", len(outputs))
     return outputs
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
-def run(cfg: Config) -> None:
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
-
-    primary_plant_codes = load_primary_plant_codes(cfg.primary_plants_xlsx)
-    primary_plant_codes = (primary_plant_codes - cfg.task1_exclude_plant_codes) | cfg.task1_include_extra_plant_codes
-
-    # Load the full Consignment Report once — used for both the MTR Analysis
-    # lookups AND Trip Repush (avoids reading this 60MB+ file twice).
-    consignment_full = load_consignment_report_full(cfg.consignment_xlsx)
-    city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
-
-    mtr = load_raw_mtr(cfg.mtr_csv, chunksize=cfg.csv_chunksize)
-
-    # --- Output 1: MTR Analysis ---
-    analyzed = build_analysis_columns(
-        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
-    )
-    analyzed = reorder_to_final_layout(analyzed)
-
-    csv_path = cfg.output_dir / f"{cfg.output_basename}.csv"
-    write_csv(analyzed, csv_path)
-
-    if cfg.write_xlsx:
-        pivots_by_sheet = build_all_pivots(analyzed)
-        xlsx_path = cfg.output_dir / f"{cfg.output_basename}.xlsx"
-        write_xlsx_streaming("mtr - analysis", analyzed, pivots_by_sheet, xlsx_path)
-
-    # --- Output 2: Trip Repush — CONFIRMED logic, see run_task1_trip_repush() ---
-    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
-    write_csv(trip_repush, cfg.output_dir / f"Trip_Repush_{cfg.run_date_label}.csv")
-    if cfg.write_xlsx:
-        # Real file keeps one tab per date in the same workbook (accumulates
-        # over time). This writes a fresh single-tab file each run — if the
-        # accumulating-history behavior matters, extend this to open the
-        # existing workbook (openpyxl, NOT xlsxwriter, since only openpyxl
-        # can append a sheet to an existing file) and add a new tab rather
-        # than overwrite.
-        with pd.ExcelWriter(cfg.output_dir / f"Trip_Repush_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
-            trip_repush.to_excel(writer, sheet_name=cfg.run_date_label[:31], index=False)
-
-    # --- Output 3: Mapping issue — CONFIRMED (100% recall), see run_task1_mapping() docstring ---
-    # Note: this produces a WIDER candidate list than the real file (safe —
-    # no real vehicle is ever excluded — but not yet precision-matched).
-    if cfg.xswift_live_dashboard_xlsx and cfg.at_live_dashboard_xlsx:
-        primary_plant_companies = load_primary_plant_companies(cfg.primary_plants_xlsx)
-        task1_results = run_task1_mapping(cfg, primary_plant_companies)
-        for name, df in task1_results.items():
-            write_csv(df, cfg.output_dir / f"Mapping_issue_{name.replace(' ', '_')}.csv")
-    else:
-        log.info("Mapping issue inputs not provided — skipping (pass --xswift-live-dashboard-xlsx and --at-live-dashboard-xlsx to run it).")
-
-    log.info("Pipeline complete.")
 
 
 if __name__ == "__main__":
@@ -900,12 +926,11 @@ if __name__ == "__main__":
     parser.add_argument("--mtr-csv", type=Path, required=True)
     parser.add_argument("--consignment-xlsx", type=Path, required=True)
     parser.add_argument("--primary-plants-xlsx", type=Path, required=True)
-    parser.add_argument("--xswift-live-dashboard-xlsx", type=Path, default=None, help="XSwift Live Trip Dashboard export (Task 1, on hold)")
-    parser.add_argument("--at-live-dashboard-xlsx", type=Path, default=None, help="AT Live Trip Dashboard export (Task 1, on hold)")
+    parser.add_argument("--xswift-live-dashboard-xlsx", type=Path, default=None, help="XSwift Live Trip Dashboard export (needed for Mapping issue output)")
+    parser.add_argument("--at-live-dashboard-xlsx", type=Path, default=None, help="AT Live Trip Dashboard export (needed for Mapping issue output)")
     parser.add_argument("--output-dir", type=Path, default=Path("./output"))
-    parser.add_argument("--run-date-label", type=str, default="output", help="Tab name for Trip Repush output, e.g. '20 July'")
-    parser.add_argument("--no-xlsx", action="store_true", help="Skip writing .xlsx, CSV only (faster)")
-    parser.add_argument("--csv-chunksize", type=int, default=None, help="Read CSV in chunks (for low-RAM machines)")
+    parser.add_argument("--run-date-label", type=str, default="output", help="e.g. '20 July' — used in every output filename and as the Trip Repush tab name")
+    parser.add_argument("--csv-chunksize", type=int, default=None, help="Read the raw MTR input CSV in chunks (for low-RAM machines) — unrelated to output format, which is always xlsx")
     args = parser.parse_args()
 
     config = Config(
@@ -916,7 +941,6 @@ if __name__ == "__main__":
         at_live_dashboard_xlsx=args.at_live_dashboard_xlsx,
         output_dir=args.output_dir,
         run_date_label=args.run_date_label,
-        write_xlsx=not args.no_xlsx,
         csv_chunksize=args.csv_chunksize,
     )
 

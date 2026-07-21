@@ -10,9 +10,10 @@ never corrupts the binary stdout stream):
             primary_plants_xlsx
             xswift_live_dashboard_xlsx   (only if has_dashboards)
             at_live_dashboard_xlsx       (only if has_dashboards)
-  stdout: a single zip file containing every output report
-            (MTR_Analysis.csv/.xlsx, Trip_Repush_<label>.csv/.xlsx,
-             Mapping_issue_Not_in_AT.csv, Mapping_issue_Not_in_Swift.csv)
+  stdout: a single zip file containing the 3 output reports, xlsx only
+            (MTR_Analysis_-_<label>.xlsx, Trip_Repush_-_<label>.xlsx,
+             Mapping_issue_-_<label>.xlsx) — filenames are whatever
+            mtr_analysis.run_in_memory() returns, not hardcoded here.
 
 Everything happens in RAM via run_in_memory() — this script never calls
 open() on a real path, never writes a temp file, and exits as soon as

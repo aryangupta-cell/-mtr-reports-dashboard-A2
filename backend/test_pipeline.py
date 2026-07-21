@@ -191,3 +191,53 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 print(f"\n{'=' * 50}")
 print(f"GRAND FINAL: {'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} total checks passed")
+
+# --- Regression test: xlsx write must not silently drop columns ---
+# Guards against a real, previously-shipped bug: xlsxwriter's
+# `constant_memory: True` option silently wrote only the FIRST column of
+# a DataFrame and left every other column blank, with no error raised.
+# This test fails loudly if that regression is ever reintroduced.
+import tempfile
+from mtr_analysis import write_xlsx
+from openpyxl import load_workbook
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    test_df = pd.DataFrame({
+        "Trip ID": [1, 2, 3],
+        "Vehicle No.": ["V1", "V2", "V3"],
+        "Plant name": ["Plant A", "Plant B", "Plant C"],
+        NEW_TRANSPORTER_REMARK: ["Available", "Not Available", "Available"],
+    })
+    test_path = Path(tmpdir) / "regression_test.xlsx"
+    write_xlsx("main", test_df, {}, test_path)
+
+    wb = load_workbook(test_path, read_only=True, data_only=True)
+    written_rows = list(wb["main"].iter_rows(max_row=4, values_only=True))
+    wb.close()
+
+    # Check formatting directly from the workbook's styles (non-read-only load)
+    from openpyxl import load_workbook as load_wb_full
+    wb_full = load_wb_full(test_path)
+    ws_full = wb_full["main"]
+    # Find the "Transporter Remark" column (col D, index 4, 1-based) and
+    # check its header cell has a yellow fill; "Trip ID" (col A) should not.
+    transporter_remark_col_idx = list(test_df.columns).index(NEW_TRANSPORTER_REMARK) + 1
+    trip_id_header_fill = ws_full.cell(row=1, column=1).fill.fgColor.rgb
+    transporter_remark_header_fill = ws_full.cell(row=1, column=transporter_remark_col_idx).fill.fgColor.rgb
+    wb_full.close()
+
+    regression_checks = [
+        ("xlsx write: header row intact", written_rows[0] == ("Trip ID", "Vehicle No.", "Plant name", NEW_TRANSPORTER_REMARK)),
+        ("xlsx write: row 1 fully populated (not just first column)", written_rows[1] == (1, "V1", "Plant A", "Available")),
+        ("xlsx write: row 2 fully populated (not just first column)", written_rows[2] == (2, "V2", "Plant B", "Not Available")),
+        ("xlsx write: row 3 fully populated (not just first column)", written_rows[3] == (3, "V3", "Plant C", "Available")),
+        ("xlsx formatting: Trip ID header NOT yellow", trip_id_header_fill != "FFFFFF00"),
+        ("xlsx formatting: Transporter Remark header IS yellow", transporter_remark_header_fill == "FFFFFF00"),
+    ]
+    print(f"\n--- XLSX corruption regression checks ---")
+    for desc, passed in regression_checks:
+        print(f"  [{'x' if passed else ' '}] {desc}")
+    checks.extend(regression_checks)
+
+print(f"\n{'=' * 50}")
+print(f"ABSOLUTE FINAL: {'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} total checks passed")
