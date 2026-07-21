@@ -49,6 +49,7 @@ placeholder / TODO where the business rule isn't confirmed yet:
 
 from __future__ import annotations
 
+import io
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -716,6 +717,122 @@ def write_xlsx_streaming(main_sheet_name: str, main_df: pd.DataFrame,
 
         main_df.to_excel(writer, sheet_name=main_sheet_name[:31], index=False)
     log.info("XLSX written: %.1f MB", path.stat().st_size / 1e6)
+
+
+# =============================================================================
+# In-memory (RAM-only) I/O — for environments where the pipeline must not
+# write anything to disk, even temporarily (e.g. a shared company server
+# where we're only permitted to use CPU/RAM, not storage).
+#
+# These mirror the disk-based writers above byte-for-byte in OUTPUT CONTENT
+# — same to_csv/to_excel calls, same xlsxwriter constant_memory mode — the
+# only difference is the target is an io.BytesIO buffer instead of a Path.
+# None of the actual business logic (build_analysis_columns,
+# run_task1_trip_repush, run_task1_mapping, reorder_to_final_layout,
+# build_all_pivots) is touched by this section at all.
+# =============================================================================
+
+def _write_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def _write_xlsx_bytes(main_sheet_name: str, main_df: pd.DataFrame,
+                       pivots_by_sheet: dict[str, list[tuple[str, pd.DataFrame]]]) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter", engine_kwargs={"options": {"constant_memory": True}}) as writer:
+        for sheet_name, pivots in pivots_by_sheet.items():
+            row_cursor = 0
+            for title, pivot_df in pivots:
+                title_df = pd.DataFrame([[title]])
+                title_df.to_excel(writer, sheet_name=sheet_name, index=False, header=False,
+                                   startrow=row_cursor)
+                row_cursor += 1
+                pivot_df.to_excel(writer, sheet_name=sheet_name, startrow=row_cursor)
+                row_cursor += len(pivot_df) + pivot_df.columns.nlevels + 3
+            if not pivots:
+                pd.DataFrame().to_excel(writer, sheet_name=sheet_name)
+
+        main_df.to_excel(writer, sheet_name=main_sheet_name[:31], index=False)
+    return buf.getvalue()
+
+
+def _write_single_sheet_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+    return buf.getvalue()
+
+
+def run_in_memory(
+    mtr_csv: bytes,
+    consignment_xlsx: bytes,
+    primary_plants_xlsx: bytes,
+    run_date_label: str,
+    xswift_live_dashboard_xlsx: bytes | None = None,
+    at_live_dashboard_xlsx: bytes | None = None,
+    task1_exclude_plant_codes: set[str] | None = None,
+    task1_include_extra_plant_codes: set[str] | None = None,
+    write_xlsx: bool = True,
+) -> dict[str, bytes]:
+    """Same pipeline, same inputs, same outputs as run() — the only
+    difference is every input/output is raw bytes in RAM, never a path on
+    disk. Returns {output_filename: file_bytes}.
+
+    Reuses build_analysis_columns / run_task1_trip_repush /
+    run_task1_mapping / reorder_to_final_layout / build_all_pivots exactly
+    as-is — those are the functions with the actual confirmed business
+    logic, and none of them are modified here.
+    """
+    log.info("Running pipeline in-memory (no disk writes)")
+
+    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
+    primary_plant_codes = (
+        (primary_plant_codes - (task1_exclude_plant_codes or set()))
+        | (task1_include_extra_plant_codes or set())
+    )
+
+    consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
+    city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
+
+    mtr = load_raw_mtr(io.BytesIO(mtr_csv))
+
+    # Config is only used here to carry business-rule thresholds through to
+    # build_analysis_columns() — its path fields are unused in this path.
+    cfg = Config(
+        mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
+        run_date_label=run_date_label,
+    )
+
+    outputs: dict[str, bytes] = {}
+
+    analyzed = build_analysis_columns(
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+    )
+    analyzed = reorder_to_final_layout(analyzed)
+    outputs[f"{cfg.output_basename}.csv"] = _write_csv_bytes(analyzed)
+    if write_xlsx:
+        pivots_by_sheet = build_all_pivots(analyzed)
+        outputs[f"{cfg.output_basename}.xlsx"] = _write_xlsx_bytes("mtr - analysis", analyzed, pivots_by_sheet)
+
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    outputs[f"Trip_Repush_{run_date_label}.csv"] = _write_csv_bytes(trip_repush)
+    if write_xlsx:
+        outputs[f"Trip_Repush_{run_date_label}.xlsx"] = _write_single_sheet_xlsx_bytes(
+            trip_repush, run_date_label
+        )
+
+    if xswift_live_dashboard_xlsx and at_live_dashboard_xlsx:
+        primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
+        cfg.xswift_live_dashboard_xlsx = io.BytesIO(xswift_live_dashboard_xlsx)
+        cfg.at_live_dashboard_xlsx = io.BytesIO(at_live_dashboard_xlsx)
+        task1_results = run_task1_mapping(cfg, primary_plant_companies)
+        for name, df in task1_results.items():
+            outputs[f"Mapping_issue_{name.replace(' ', '_')}.csv"] = _write_csv_bytes(df)
+    else:
+        log.info("Mapping issue inputs not provided — skipping.")
+
+    log.info("Pipeline complete (in-memory). %d output files.", len(outputs))
+    return outputs
 
 
 # =============================================================================

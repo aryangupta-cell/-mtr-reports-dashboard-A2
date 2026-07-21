@@ -1,40 +1,42 @@
 """FastAPI backend for the MTR Analysis dashboard.
 
 Flow (why it's async, not a single request):
-  1. POST /api/jobs receives the 5 uploaded files + run_date_label, saves them
-     to disk under jobs/<job_id>/input/, and returns immediately with a job_id.
-  2. A background worker thread runs the actual mtr_analysis.run() pipeline
-     against those saved files. This step can take minutes (200MB+ xlsx read
-     with openpyxl) — it must NOT happen inside the upload request, or the
-     browser/Render's reverse proxy will time out.
+  1. POST /api/jobs reads the 5 uploaded files into memory (never written to
+     Render's disk) and returns immediately with a job_id.
+  2. A background thread sends those bytes over SSH to the company server,
+     which runs the actual pipeline (server_worker.py -> run_in_memory())
+     and streams the output files back. This step takes several minutes —
+     it must NOT happen inside the upload request, or the browser/Render's
+     reverse proxy will time out.
   3. Frontend polls GET /api/jobs/<job_id> until status == "done" (or
      "failed"), then downloads each output file from
-     GET /api/jobs/<job_id>/download/<filename>.
+     GET /api/jobs/<job_id>/download/<filename> — served straight from the
+     in-memory bytes we got back over SSH.
 
-Only ONE job runs at a time (max_workers=1) — this pipeline briefly holds
-both the 200MB Consignment Report and the 300k-row MTR frame in memory;
-running two concurrently on a small Render instance risks OOM.
+Only ONE job runs at a time (max_workers=1) — deliberately serializes
+requests to the company server rather than hammering it with concurrent
+SSH sessions.
+
+Nothing in this file ever touches Render's disk. All files are bytes in
+memory, both incoming (uploads) and outgoing (results from the company
+server).
 """
 
-import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
-from mtr_analysis import Config, run
+from ssh_worker import run_on_company_server
 from jobs_store import create_job, get_job, update_job, purge_older_than
 
 BASE_DIR = Path(__file__).parent.parent
-JOBS_DIR = BASE_DIR / "jobs"
-JOBS_DIR.mkdir(exist_ok=True)
-
-JOB_TTL_SECONDS = 2 * 60 * 60  # delete job files 2 hours after creation
+JOB_TTL_SECONDS = 2 * 60 * 60  # forget job results 2 hours after creation
 
 app = FastAPI(title="MTR Analysis Dashboard API")
 app.add_middleware(
@@ -48,19 +50,26 @@ app.add_middleware(
 executor = ThreadPoolExecutor(max_workers=1)
 
 
-def _save_upload(upload: UploadFile, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with dest.open("wb") as f:
-        shutil.copyfileobj(upload.file, f, length=1024 * 1024)
-
-
-def _run_job(job_id: str, cfg: Config) -> None:
+def _run_job(
+    job_id: str,
+    mtr_csv: bytes,
+    consignment_xlsx: bytes,
+    primary_plants_xlsx: bytes,
+    run_date_label: str,
+    xswift_live_dashboard_xlsx: bytes | None,
+    at_live_dashboard_xlsx: bytes | None,
+) -> None:
     update_job(job_id, status="running")
     try:
-        run(cfg)
-        output_dir = cfg.output_dir
-        files = sorted(p.name for p in output_dir.iterdir() if p.is_file())
-        update_job(job_id, status="done", output_files=files)
+        outputs = run_on_company_server(
+            mtr_csv=mtr_csv,
+            consignment_xlsx=consignment_xlsx,
+            primary_plants_xlsx=primary_plants_xlsx,
+            run_date_label=run_date_label,
+            xswift_live_dashboard_xlsx=xswift_live_dashboard_xlsx,
+            at_live_dashboard_xlsx=at_live_dashboard_xlsx,
+        )
+        update_job(job_id, status="done", output_files=outputs)
     except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
         update_job(job_id, status="failed", error=str(exc))
 
@@ -75,42 +84,18 @@ async def create_analysis_job(
     at_live_dashboard_xlsx: UploadFile | None = File(None),
 ):
     job = create_job()
-    job_dir = JOBS_DIR / job.id
-    input_dir = job_dir / "input"
-    output_dir = job_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    mtr_csv_path = input_dir / "mtr.csv"
-    consignment_path = input_dir / "consignment.xlsx"
-    plants_path = input_dir / "primary_plants.xlsx"
-    _save_upload(mtr_csv, mtr_csv_path)
-    _save_upload(consignment_xlsx, consignment_path)
-    _save_upload(primary_plants_xlsx, plants_path)
+    mtr_csv_bytes = await mtr_csv.read()
+    consignment_bytes = await consignment_xlsx.read()
+    plants_bytes = await primary_plants_xlsx.read()
+    xswift_bytes = await xswift_live_dashboard_xlsx.read() if xswift_live_dashboard_xlsx else None
+    at_bytes = await at_live_dashboard_xlsx.read() if at_live_dashboard_xlsx else None
 
-    # NOTE: Mapping issue (the feature these two dashboard files feed) is
-    # still ON HOLD in the pipeline — see mtr_analysis.py / README. These
-    # are accepted and saved for forward-compatibility but currently unused
-    # by run().
-    xswift_dashboard_path = None
-    at_dashboard_path = None
-    if xswift_live_dashboard_xlsx is not None:
-        xswift_dashboard_path = input_dir / "xswift_live_dashboard.xlsx"
-        _save_upload(xswift_live_dashboard_xlsx, xswift_dashboard_path)
-    if at_live_dashboard_xlsx is not None:
-        at_dashboard_path = input_dir / "at_live_dashboard.xlsx"
-        _save_upload(at_live_dashboard_xlsx, at_dashboard_path)
-
-    cfg = Config(
-        mtr_csv=mtr_csv_path,
-        consignment_xlsx=consignment_path,
-        primary_plants_xlsx=plants_path,
-        xswift_live_dashboard_xlsx=xswift_dashboard_path,
-        at_live_dashboard_xlsx=at_dashboard_path,
-        output_dir=output_dir,
-        run_date_label=run_date_label,
+    executor.submit(
+        _run_job, job.id,
+        mtr_csv_bytes, consignment_bytes, plants_bytes, run_date_label,
+        xswift_bytes, at_bytes,
     )
-
-    executor.submit(_run_job, job.id, cfg)
     return {"job_id": job.id, "status": job.status}
 
 
@@ -123,7 +108,7 @@ async def job_status(job_id: str):
         "job_id": job.id,
         "status": job.status,
         "error": job.error,
-        "output_files": job.output_files,
+        "output_files": sorted(job.output_files.keys()),
     }
 
 
@@ -132,19 +117,20 @@ async def download_output(job_id: str, filename: str):
     job = get_job(job_id)
     if job is None or job.status != "done":
         raise HTTPException(status_code=404, detail="Job not found or not finished yet")
-    if filename not in job.output_files:
+    data = job.output_files.get(filename)
+    if data is None:
         raise HTTPException(status_code=404, detail="File not found for this job")
-    path = JOBS_DIR / job_id / "output" / filename
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File missing on disk")
-    return FileResponse(path, filename=filename)
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _cleanup_loop():
     while True:
         time.sleep(15 * 60)
-        for job_id in purge_older_than(JOB_TTL_SECONDS):
-            shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
+        purge_older_than(JOB_TTL_SECONDS)
 
 
 threading.Thread(target=_cleanup_loop, daemon=True).start()

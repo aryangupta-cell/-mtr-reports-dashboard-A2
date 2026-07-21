@@ -12,7 +12,7 @@ class Job:
     id: str
     status: str = "queued"          # queued -> running -> done | failed
     error: str | None = None
-    output_files: list[str] = field(default_factory=list)   # filenames in jobs/{id}/output
+    output_files: dict[str, bytes] = field(default_factory=dict)   # {filename: file_bytes}, RAM-only
     created_at: float = field(default_factory=time.time)
 
 
