@@ -12,7 +12,8 @@ class Job:
     id: str
     status: str = "queued"          # queued -> running -> done | failed
     error: str | None = None
-    output_files: dict[str, bytes] = field(default_factory=dict)   # {filename: file_bytes}, RAM-only
+    output_zip_path: str | None = None   # path to the zip of all output reports, on Render's disk
+    output_files: list[str] = field(default_factory=list)   # filenames inside output_zip_path
     created_at: float = field(default_factory=time.time)
 
 
