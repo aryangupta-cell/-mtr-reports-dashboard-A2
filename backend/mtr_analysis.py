@@ -151,8 +151,13 @@ NEW_SAP_AI = "SAP-AI"
 NEW_SAP_AI_REMARK = "SAP-AI Remark"
 NEW_XSWIFT_PLANT_NAME_MATCH = "XSwift Plant Name Match"  # added 2026-07-22, appended at the end
 
-# Stamp Status values that gate several checks (confirmed from notes)
-STAMP_STATUSES_FOR_CHECKS = {"Verified", "Low Confidence"}
+# Stamp Status values that gate several checks. FIXED 2026-07-22: the raw
+# MTR export's actual value is "Stamp Verified" (confirmed directly from a
+# real file's Stamp Status column: {"Stamp Verified", "Rejected", "Pending",
+# "Low Confidence"}) — the old "Verified" never matched anything, silently
+# leaving "AI check"/"SAP-AI"/"SAP-AI Remark"/Destination detention slab
+# blank for 230k+ of 281k rows instead of computing them.
+STAMP_STATUSES_FOR_CHECKS = {"Stamp Verified", "Low Confidence"}
 
 # --- AT Consignment Report columns we read ---
 CONS_SAP_PGI_NO = "SAP PGI No"
@@ -660,10 +665,23 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     df[NEW_SAP_AI] = np.where(in_stamp_scope, sap_ai_diff, np.nan)
 
     lo, hi = cfg.sap_ai_ok_band
+    # FIXED 2026-07-22 — confirmed directly against the real file: "AI is
+    # blank" fires ONLY when AI Repaired Distance is genuinely BLANK (892
+    # real rows), NOT when it's literal "0" — a literal 0 is a valid
+    # number, sap_ai_diff computes normally from it, and the row is
+    # classified into the ok-band/high/low bands like any other value
+    # (confirmed: real rows with AI Repaired Distance == "0" land in
+    # "0-20 "/"AI usages is low" depending on the resulting diff, never
+    # "AI is blank"). ai_blank_or_zero (blank OR zero) is still correct
+    # for the separate AI check column above — do not reuse it here.
+    ai_is_blank = _is_blank(df[COL_AI_REPAIRED_DIST])
     sap_ai_remark = pd.Series("", index=df.index)
-    sap_ai_remark = sap_ai_remark.mask(in_stamp_scope & (ai_dist_numeric.fillna(-1) == 0), "AI is blank")
+    sap_ai_remark = sap_ai_remark.mask(in_stamp_scope & ai_is_blank, "AI is blank")
+    # Real file's label for the ok-band is the literal string "0-20 "
+    # (trailing space and all, confirmed from the real file), not derived
+    # from lo/hi.
     ok_band = in_stamp_scope & sap_ai_diff.between(lo, hi) & (sap_ai_remark == "")
-    sap_ai_remark = sap_ai_remark.mask(ok_band, f"{lo} to {hi}")
+    sap_ai_remark = sap_ai_remark.mask(ok_band, "0-20 ")
     high = in_stamp_scope & (sap_ai_diff < lo) & (sap_ai_remark == "")
     sap_ai_remark = sap_ai_remark.mask(high, "AI usages is high")
     low = in_stamp_scope & (sap_ai_diff > hi) & (sap_ai_remark == "")

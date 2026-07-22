@@ -39,20 +39,30 @@ rows = [
     dict(TripID=3, Vehicle="V3", SAPPGI="P3", PGIDT="20 Jul 26 09:37", Transporter="XYZ Transport", Zone="South A",
          YardIn="2026-07-20 01:00", YardOut="2026-07-20 01:00", YardDet="0", PlantName="Sidhi", PlantCode="6951",
          PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="15:00", DestCode="XX99", Dest="TESTDEST",
-         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:45", DestDet="0:45", Stamp="Verified",
+         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:45", DestDet="0:45", Stamp="Stamp Verified",
          SapLead="100", GPS="95", AI="130"),  # SAP-AI = 100-130 = -30 -> "AI usages is high"
-    # row 3: AI Repaired Distance = 0 -> "AI is blank"
+    # row 3: AI Repaired Distance literal "0" -> AI check "Not Available" but
+    # SAP-AI Remark still bands normally off the real diff (50-0=50 -> low),
+    # NOT "AI is blank" (real bug fix: literal 0 is a valid number, only
+    # genuinely blank AI Repaired Distance gets "AI is blank" — see row 5).
     dict(TripID=4, Vehicle="V4", SAPPGI="P4", PGIDT="20 Jul 26 09:37", Transporter="Foo Carriers", Zone="East A",
          YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Dalla", PlantCode="6633-3301",
          PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="YY88", Dest="OTHERDEST",
          DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Low Confidence",
          SapLead="50", GPS="48", AI="0"),
-    # row 4: SAP-AI within -20..20 -> "0 to 20"
+    # row 4: SAP-AI within -20..20 -> "0-20 "
     dict(TripID=5, Vehicle="V5", SAPPGI="P5", PGIDT="20 Jul 26 09:37", Transporter="Bar Logistics", Zone="Central A",
          YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Vikram", PlantCode="6911",
          PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="ZZ77", Dest="THIRDDEST",
-         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Verified",
-         SapLead="60", GPS="59", AI="55"),  # SAP-AI = 5 -> "0 to 20"
+         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Stamp Verified",
+         SapLead="60", GPS="59", AI="55"),  # SAP-AI = 5 -> "0-20 "
+    # row 5: AI Repaired Distance BLANK (not literal "0") -> "AI is blank" too
+    # (real bug fix: this case was only catching literal 0, not blank)
+    dict(TripID=6, Vehicle="V6", SAPPGI="P6", PGIDT="20 Jul 26 09:37", Transporter="Foo Carriers", Zone="East A",
+         YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Dalla", PlantCode="6633-3301",
+         PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="YY88", Dest="OTHERDEST",
+         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Stamp Verified",
+         SapLead="50", GPS="48", AI=SP),
 ]
 
 df_raw = pd.DataFrame(rows)
@@ -108,12 +118,14 @@ checks = [
     ("row2 AT destination name == '#N/A' (ZZ.. not in lookup? no XX99)", result.loc[2, NEW_AT_DEST_NAME] == "#N/A"),
     ("row2 Dest. Match == 'NA'", result.loc[2, NEW_DEST_MATCH] == "NA"),
     ("row3 AI check == 'Not Available' (AI=0)", result.loc[3, NEW_AI_CHECK] == "Not Available"),
-    ("row3 SAP-AI Remark == 'AI is blank'", result.loc[3, NEW_SAP_AI_REMARK] == "AI is blank"),
-    ("row4 SAP-AI Remark == '-20 to 20'", result.loc[4, NEW_SAP_AI_REMARK] == "-20 to 20"),
+    ("row3 SAP-AI Remark == 'AI usages is low' (literal 0, not blank -> bands normally)", result.loc[3, NEW_SAP_AI_REMARK] == "AI usages is low"),
+    ("row4 SAP-AI Remark == '0-20 '", result.loc[4, NEW_SAP_AI_REMARK] == "0-20 "),
     ("row4 AI check == 'Available'", result.loc[4, NEW_AI_CHECK] == "Available"),
     ("row0 XSwift Plant Name Match == 'TRUE' (registered name matches)", result.loc[0, NEW_XSWIFT_PLANT_NAME_MATCH] == "TRUE"),
     ("row1 XSwift Plant Name Match == 'FALSE' (registered name differs)", result.loc[1, NEW_XSWIFT_PLANT_NAME_MATCH] == "FALSE"),
     ("row2 XSwift Plant Name Match == 'NA' (code not in reference map)", result.loc[2, NEW_XSWIFT_PLANT_NAME_MATCH] == "NA"),
+    ("row5 AI check == 'Not Available' (AI Repaired Distance BLANK, not literal 0)", result.loc[5, NEW_AI_CHECK] == "Not Available"),
+    ("row5 SAP-AI Remark == 'AI is blank' (real bug fix: blank must count, not just literal 0)", result.loc[5, NEW_SAP_AI_REMARK] == "AI is blank"),
 ]
 
 print(f"{'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} checks passed\n")
