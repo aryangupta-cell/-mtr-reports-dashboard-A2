@@ -32,28 +32,27 @@ log = logging.getLogger("ssh_worker")
 
 def build_input_zip(
     zip_path: Path,
-    mtr_csv_path: Path,
-    consignment_xlsx_path: Path,
-    primary_plants_xlsx_path: Path,
+    report: str,
     run_date_label: str,
-    xswift_live_dashboard_xlsx_path: Path | None = None,
-    at_live_dashboard_xlsx_path: Path | None = None,
+    files: dict[str, Path],
 ) -> None:
     """Zips the already-on-disk input files into zip_path. zipfile.write()
     streams each source file in chunks internally — it never loads a full
     file into memory, so this stays flat regardless of file size.
+
+    `report` selects which of the 4 independent report functions
+    server_worker.py runs (mtr_analysis / trip_repush / mapping_issue /
+    vehicle_status). `files` maps abstract names (mtr_csv,
+    consignment_xlsx, primary_plants_xlsx, xswift_live_dashboard_xlsx,
+    at_live_dashboard_xlsx) to on-disk paths — only include whichever
+    files that report actually needs.
     """
-    has_dashboards = bool(xswift_live_dashboard_xlsx_path and at_live_dashboard_xlsx_path)
-    manifest = {"run_date_label": run_date_label, "has_dashboards": has_dashboards}
+    manifest = {"report": report, "run_date_label": run_date_label}
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest))
-        zf.write(mtr_csv_path, arcname="mtr_csv")
-        zf.write(consignment_xlsx_path, arcname="consignment_xlsx")
-        zf.write(primary_plants_xlsx_path, arcname="primary_plants_xlsx")
-        if has_dashboards:
-            zf.write(xswift_live_dashboard_xlsx_path, arcname="xswift_live_dashboard_xlsx")
-            zf.write(at_live_dashboard_xlsx_path, arcname="at_live_dashboard_xlsx")
+        for arcname, path in files.items():
+            zf.write(path, arcname=arcname)
 
 
 def run_on_company_server(input_zip_path: Path, output_zip_path: Path) -> None:

@@ -199,7 +199,7 @@ REQUIRED_CONSIGNMENT_COLUMNS = [
 ]
 
 REQUIRED_XSWIFT_DASHBOARD_COLUMNS = ["Vehicle No", "Vehicle Status"]
-REQUIRED_AT_DASHBOARD_COLUMNS = ["Company Name", "Vehicle"]
+REQUIRED_AT_DASHBOARD_COLUMNS = ["Company Name", "Vehicle", "Status"]
 
 
 class ColumnValidationError(ValueError):
@@ -243,8 +243,8 @@ def _check_columns(file_label: str, actual: list[str], required: list[str],
 
 
 def validate_inputs(
-    mtr_csv,
-    consignment_xlsx,
+    mtr_csv=None,
+    consignment_xlsx=None,
     xswift_live_dashboard_xlsx=None,
     at_live_dashboard_xlsx=None,
 ) -> dict[str, dict[str, list[str]]]:
@@ -254,20 +254,26 @@ def validate_inputs(
     reported but never raise — they're already handled (kept, not dropped)
     by reorder_to_final_layout().
 
+    Every argument is optional and independently checked — pass only the
+    files relevant to whichever report you're running (each of the 4
+    report functions below only validates its own inputs).
+
     Accepts the same input shapes as run_in_memory()/run() — bytes, a
     Path, or an open file-like object.
     """
     report: dict[str, dict[str, list[str]]] = {}
 
-    mtr_src = io.BytesIO(mtr_csv) if isinstance(mtr_csv, bytes) else mtr_csv
-    _check_columns("Raw MTR CSV", _peek_columns(mtr_src), REQUIRED_MTR_CSV_COLUMNS, report)
+    if mtr_csv:
+        mtr_src = io.BytesIO(mtr_csv) if isinstance(mtr_csv, bytes) else mtr_csv
+        _check_columns("Raw MTR CSV", _peek_columns(mtr_src), REQUIRED_MTR_CSV_COLUMNS, report)
 
-    cons_src = io.BytesIO(consignment_xlsx) if isinstance(consignment_xlsx, bytes) else consignment_xlsx
-    _check_columns(
-        "AT Consignment Report",
-        _peek_columns(cons_src, sheet_name="Consignment Report"),
-        REQUIRED_CONSIGNMENT_COLUMNS, report,
-    )
+    if consignment_xlsx:
+        cons_src = io.BytesIO(consignment_xlsx) if isinstance(consignment_xlsx, bytes) else consignment_xlsx
+        _check_columns(
+            "AT Consignment Report",
+            _peek_columns(cons_src, sheet_name="Consignment Report"),
+            REQUIRED_CONSIGNMENT_COLUMNS, report,
+        )
 
     if xswift_live_dashboard_xlsx:
         xswift_src = io.BytesIO(xswift_live_dashboard_xlsx) if isinstance(xswift_live_dashboard_xlsx, bytes) else xswift_live_dashboard_xlsx
@@ -1048,6 +1054,162 @@ def run_in_memory(
 
     log.info("Pipeline complete (in-memory). %d xlsx files.", len(outputs))
     return outputs
+
+
+# =============================================================================
+# Independent per-report functions (2026-07-22) — dashboard restructured to
+# 4 separate report tabs (like the JKLC dashboard), each with only its own
+# required inputs, each producing exactly ONE output file. These are
+# additive — run() and run_in_memory() above are untouched, still work for
+# CLI/bulk use. Each function below reuses the same underlying business
+# logic functions (build_analysis_columns, run_task1_trip_repush,
+# run_task1_mapping, reorder_to_final_layout) unmodified.
+# =============================================================================
+
+def run_mtr_analysis_report(
+    mtr_csv: bytes, consignment_xlsx: bytes, primary_plants_xlsx: bytes, run_date_label: str,
+) -> bytes:
+    """Produces MTR_Analysis_-_<date>.xlsx — main data tab ONLY.
+
+    Sheet1/Sheet2 pivots deliberately dropped (2026-07-22, explicit
+    instruction) — the previous pivot replication was confirmed wrong
+    (invented titles, ignored filter fields, wrong vertical-stack layout
+    vs. the real file's side-by-side anchors) and is on hold pending a
+    proper rebuild. Do not re-add pivots here without that rebuild.
+    """
+    validate_inputs(mtr_csv=mtr_csv, consignment_xlsx=consignment_xlsx)
+
+    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
+    consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
+    city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
+    mtr = load_raw_mtr(io.BytesIO(mtr_csv))
+
+    cfg = Config(
+        mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
+        run_date_label=run_date_label,
+    )
+    analyzed = build_analysis_columns(
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+    )
+    analyzed = reorder_to_final_layout(analyzed)
+
+    buf = io.BytesIO()
+    write_xlsx(f"mtr - {run_date_label}", analyzed, {}, buf)
+    return buf.getvalue()
+
+
+def run_trip_repush_report(
+    mtr_csv: bytes, consignment_xlsx: bytes, primary_plants_xlsx: bytes, run_date_label: str,
+) -> bytes:
+    """Produces Trip_Repush_-_<date>.xlsx — one tab, named after run_date_label."""
+    validate_inputs(mtr_csv=mtr_csv, consignment_xlsx=consignment_xlsx)
+
+    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
+    consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
+    mtr = load_raw_mtr(io.BytesIO(mtr_csv))
+
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
+    return buf.getvalue()
+
+
+def run_mapping_issue_report(
+    xswift_live_dashboard_xlsx: bytes, at_live_dashboard_xlsx: bytes, primary_plants_xlsx: bytes,
+    run_date_label: str,
+) -> bytes:
+    """Produces Mapping_issue_-_<date>.xlsx — one workbook, two tabs
+    (Not in AT, Not in Swift)."""
+    validate_inputs(
+        xswift_live_dashboard_xlsx=xswift_live_dashboard_xlsx,
+        at_live_dashboard_xlsx=at_live_dashboard_xlsx,
+    )
+
+    primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
+    cfg = Config(
+        mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
+        xswift_live_dashboard_xlsx=io.BytesIO(xswift_live_dashboard_xlsx),
+        at_live_dashboard_xlsx=io.BytesIO(at_live_dashboard_xlsx),
+        run_date_label=run_date_label,
+    )
+    task1_results = run_task1_mapping(cfg, primary_plant_companies)
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        for name, df in task1_results.items():
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+    return buf.getvalue()
+
+
+# Raw AT dashboard Status values -> what this report needs them mapped to.
+# Confirmed 2026-07-22 directly from a real AT live dashboard export.
+AT_STATUS_TO_VEHICLE_STATUS = {"Unreachable": "Offline", "Moving": "Online", "Idle": "Idle"}
+
+
+def run_vehicle_status_report(xswift_live_dashboard_xlsx: bytes, at_live_dashboard_xlsx: bytes) -> bytes:
+    """Produces the 4th report: Vehicle Status. CONFIRMED 2026-07-22 by
+    directly diffing a real output file (Output vehicle status -
+    22 July'26.xlsx) against its two real inputs — every detail below
+    was verified against real data, not guessed from the written notes
+    alone (which were incomplete/slightly misleading on a few points):
+
+    - LEFT JOIN on Vehicle No (XSwift) / Vehicle (AT), XSwift as the base.
+      Confirmed NOT an inner join despite the notes saying "take all
+      matching vehicles" — real output row count equals XSwift's full
+      row count exactly, so every XSwift row is kept regardless of match.
+    - AT's raw Status values are remapped before the join:
+      Unreachable->Offline, Moving->Online, Idle->Idle.
+    - Unmatched XSwift vehicles get the literal STRING "#N/A" in both
+      new columns (not blank/NaN) — confirmed from real rows.
+    - New columns are inserted right after "Vehicle Status" (positions
+      3-4), not appended at the end — confirmed from the real header row.
+    - The notes never mentioned a "Match" column, but the real file has
+      one: True if Vehicle Status == AT vehicle status (as a real Excel
+      boolean, not a "TRUE" string), False if they differ, and the STRING
+      "#N/A" (not False) when AT vehicle status itself is "#N/A" — all 3
+      cases confirmed against real rows.
+    """
+    validate_inputs(
+        xswift_live_dashboard_xlsx=xswift_live_dashboard_xlsx,
+        at_live_dashboard_xlsx=at_live_dashboard_xlsx,
+    )
+
+    # fillna("") to match the real file's convention of a literal empty
+    # string for blank passthrough cells, not Excel's other blank
+    # representation (confirmed by diffing a real output file: blank
+    # cells there are "", not a true empty cell).
+    xswift_df = pd.read_excel(
+        io.BytesIO(xswift_live_dashboard_xlsx), sheet_name="Trip Dashboard", skiprows=2, dtype=str,
+    ).fillna("")
+    at_df = pd.read_excel(io.BytesIO(at_live_dashboard_xlsx), sheet_name="dashboard", dtype=str)
+
+    at_df = at_df.copy()
+    at_df["_mapped_status"] = at_df["Status"].map(AT_STATUS_TO_VEHICLE_STATUS)
+    vehicle_to_at_status = dict(
+        zip(at_df["Vehicle"].dropna().astype(str).str.strip(), at_df["_mapped_status"])
+    )
+
+    df = xswift_df.copy()
+    vehicle_key = df["Vehicle No"].astype(str).str.strip()
+    at_vehicle_status = vehicle_key.map(vehicle_to_at_status)
+    at_status_is_na = at_vehicle_status.isna()
+    df["AT vehicle status"] = at_vehicle_status.fillna("#N/A")
+
+    is_match = (df["Vehicle Status"] == df["AT vehicle status"])
+    match_col = pd.Series(is_match.tolist(), index=df.index, dtype=object)
+    match_col[at_status_is_na] = "#N/A"
+    df["Match"] = match_col
+
+    cols = list(xswift_df.columns)
+    vs_idx = cols.index("Vehicle Status")
+    final_cols = cols[:vs_idx + 1] + ["AT vehicle status", "Match"] + cols[vs_idx + 1:]
+    df = df[final_cols]
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, sheet_name="Sheet1", index=False)
+    return buf.getvalue()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
   header { padding: 24px 40px; font-weight: 700; font-size: 20px; border-bottom: 1px solid #e5e7eb; background: #fff; }
   .card { max-width: 640px; margin: 40px auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; }
   h1 { font-size: 24px; margin: 0 0 6px; }
-  p.sub { color: #6b7280; margin: 0 0 28px; }
+  p.sub { color: #6b7280; margin: 0 0 24px; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 18px 0 6px; color: #374151; }
   input[type=file], input[type=text] { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
   .optional { color: #9ca3af; font-weight: 400; }
@@ -23,33 +23,21 @@
   ul#files li a { display: block; padding: 10px 14px; margin-bottom: 8px; border: 1px solid #e5e7eb; border-radius: 8px; text-decoration: none; color: #4f46e5; font-weight: 600; }
   ul#files li a:hover { background: #f5f5ff; }
   #error { color: #991b1b; margin-top: 12px; font-size: 13px; white-space: pre-wrap; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+  .tab { padding: 8px 14px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; color: #374151; }
+  .tab.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
 </style>
 </head>
 <body>
 <header>ATC Report Dashboard</header>
 <div class="card">
   <h1>UTCL MTR Reports Dashboard</h1>
-  <p class="sub">Upload the input files, pick a run-date label, and download the generated reports.</p>
+  <p class="sub">Pick a report, upload the input files it needs, and download the generated output.</p>
+
+  <div class="tabs" id="tabs"></div>
 
   <form id="jobForm">
-    <label>Run date label (used as the Trip Repush tab name, e.g. "20 July")</label>
-    <input type="text" name="run_date_label" required placeholder="20 July" />
-
-    <label>Raw MTR CSV (XSwift export)</label>
-    <input type="file" name="mtr_csv" accept=".csv" required />
-
-    <label>AT Consignment Report (.xlsx)</label>
-    <input type="file" name="consignment_xlsx" accept=".xlsx" required />
-
-    <label>Primary Plants List (.xlsx)</label>
-    <input type="file" name="primary_plants_xlsx" accept=".xlsx" required />
-
-    <label>XSwift Live Trip Dashboard export <span class="optional">(optional — provide both dashboard files to also get Mapping issue)</span></label>
-    <input type="file" name="xswift_live_dashboard_xlsx" accept=".xlsx" />
-
-    <label>AT Live Dashboard export <span class="optional">(optional — provide both dashboard files to also get Mapping issue)</span></label>
-    <input type="file" name="at_live_dashboard_xlsx" accept=".xlsx" />
-
+    <div id="fieldsContainer"></div>
     <button type="submit" id="submitBtn">Upload &amp; Run</button>
   </form>
 
@@ -60,12 +48,83 @@
 
 <script>
 const API = "/api";
+
+// Single source of truth for each report's inputs — labels/order match
+// what that report actually needs (see backend/app.py's
+// REPORT_REQUIRED_FILES, which this must stay in sync with).
+const REPORTS = {
+  mtr_analysis: {
+    label: "MTR Analysis",
+    fields: [
+      { name: "run_date_label", type: "text", label: 'Run date label (e.g. "20 July")', placeholder: "20 July" },
+      { name: "mtr_csv", type: "file", accept: ".csv", label: "Raw MTR CSV (XSwift export)" },
+      { name: "consignment_xlsx", type: "file", accept: ".xlsx", label: "AT Consignment Report (.xlsx)" },
+      { name: "primary_plants_xlsx", type: "file", accept: ".xlsx", label: "Primary Plants List (.xlsx)" },
+    ],
+  },
+  trip_repush: {
+    label: "Trip Repush",
+    fields: [
+      { name: "run_date_label", type: "text", label: 'Run date label (used as the tab name, e.g. "20 July")', placeholder: "20 July" },
+      { name: "mtr_csv", type: "file", accept: ".csv", label: "Raw MTR CSV (XSwift export)" },
+      { name: "consignment_xlsx", type: "file", accept: ".xlsx", label: "AT Consignment Report (.xlsx)" },
+      { name: "primary_plants_xlsx", type: "file", accept: ".xlsx", label: "Primary Plants List (.xlsx)" },
+    ],
+  },
+  mapping_issue: {
+    label: "Mapping Issue",
+    fields: [
+      { name: "run_date_label", type: "text", label: 'Run date label (e.g. "20 July")', placeholder: "20 July" },
+      { name: "xswift_live_dashboard_xlsx", type: "file", accept: ".xlsx", label: "XSwift Live Trip Dashboard export" },
+      { name: "at_live_dashboard_xlsx", type: "file", accept: ".xlsx", label: "AT Live Dashboard export" },
+      { name: "primary_plants_xlsx", type: "file", accept: ".xlsx", label: "Primary Plants List (.xlsx)" },
+    ],
+  },
+  vehicle_status: {
+    label: "Vehicle Status",
+    fields: [
+      { name: "run_date_label", type: "text", label: 'Run date label (used in the output filename, e.g. "22 July")', placeholder: "22 July" },
+      { name: "xswift_live_dashboard_xlsx", type: "file", accept: ".xlsx", label: "XSwift Live Trip Dashboard export" },
+      { name: "at_live_dashboard_xlsx", type: "file", accept: ".xlsx", label: "AT Live Dashboard export" },
+    ],
+  },
+};
+
+const tabsEl = document.getElementById("tabs");
+const fieldsContainer = document.getElementById("fieldsContainer");
 const form = document.getElementById("jobForm");
 const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
 const filesEl = document.getElementById("files");
 const submitBtn = document.getElementById("submitBtn");
 let pollHandle = null;
+let activeReport = "mtr_analysis";
+
+function renderTabs() {
+  tabsEl.innerHTML = Object.entries(REPORTS).map(
+    ([key, r]) => `<div class="tab ${key === activeReport ? "active" : ""}" data-report="${key}">${r.label}</div>`
+  ).join("");
+  tabsEl.querySelectorAll(".tab").forEach((el) => {
+    el.addEventListener("click", () => {
+      activeReport = el.dataset.report;
+      renderTabs();
+      renderFields();
+    });
+  });
+}
+
+function renderFields() {
+  const report = REPORTS[activeReport];
+  fieldsContainer.innerHTML = report.fields.map((f) => {
+    if (f.type === "text") {
+      return `<label>${f.label}</label><input type="text" name="${f.name}" required placeholder="${f.placeholder || ""}" />`;
+    }
+    return `<label>${f.label}</label><input type="file" name="${f.name}" accept="${f.accept}" required />`;
+  }).join("");
+  statusEl.innerHTML = "";
+  errorEl.textContent = "";
+  filesEl.innerHTML = "";
+}
 
 function setStatus(text, cls) {
   statusEl.innerHTML = text ? `<span class="pill ${cls}">${text}</span>` : "";
@@ -79,6 +138,7 @@ form.addEventListener("submit", async (e) => {
   setStatus("uploading...", "queued");
 
   const formData = new FormData(form);
+  formData.append("report", activeReport);
   try {
     const res = await fetch(`${API}/jobs`, { method: "POST", body: formData });
     if (!res.ok) throw new Error((await res.json()).detail || "Upload failed");
@@ -125,6 +185,9 @@ async function pollJob(jobId) {
     // otherwise: transient blip, keep polling silently
   }
 }
+
+renderTabs();
+renderFields();
 </script>
 </body>
 </html>
