@@ -15,15 +15,19 @@ from mtr_analysis import (
     NEW_PLANT_DETENTION_SLAB, NEW_ZONE_REMARK,
     NEW_TRANSPORTER_REMARK, NEW_YARD_DETENTION_SLAB, NEW_AT_DEST_NAME,
     NEW_DEST_MATCH, NEW_DEST_DETENTION_SLAB, NEW_AT_SAP_LEAD_DIST, NEW_MATCH,
-    NEW_AI_CHECK, NEW_SAP_AI, NEW_SAP_AI_REMARK,
+    NEW_AI_CHECK, NEW_SAP_AI, NEW_SAP_AI_REMARK, NEW_XSWIFT_PLANT_NAME_MATCH,
 )
 
 SP = " "  # the real blank placeholder
 
 rows = [
-    # row 0: fresh trip, everything blank via " " placeholder, plant detention = 0
+    # row 0: fresh trip, everything blank via " " placeholder, plant detention = 0.
+    # PlantName is a real value (not blank) here specifically so is_primary's
+    # new NAME-based matching (first word "ADITYA") has something to match —
+    # unlike the old Plant-Code-based matching, a blank name can never be
+    # "primary" no matter what the code is.
     dict(TripID=1, Vehicle="V1", SAPPGI="P1", PGIDT="20 Jul 26 09:37", Transporter=SP, Zone=SP,
-         YardIn=SP, YardOut=SP, YardDet=SP, PlantName=SP, PlantCode="6910", PlantEntry="2026-07-20 09:37",
+         YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Aditya Loading", PlantCode="6910", PlantEntry="2026-07-20 09:37",
          PlantExit="2026-07-20 09:37", PlantDet="0", DestCode="CA12", Dest="AMBIKAPUR", DestEntry=SP,
          DestExit=SP, DestDet=SP, Stamp="Pending", SapLead="8", GPS=SP, AI=SP),
     # row 1: plant exit blank, entry present -> "vehicle still in plant"
@@ -72,11 +76,21 @@ mtr = pd.DataFrame({
 
 city_code_to_destination = {"CA12": "AMBIKAPUR", "VB46": "BELDA"}  # ZZ77/YY88/XX99 intentionally missing -> #N/A
 sap_pgi_to_lead_dist = {"P1": "8", "P2": "21", "P3": "100"}  # P4, P5 intentionally missing -> #N/A
-primary_plant_codes = {"6910", "6966", "6951", "6633-3301", "6911"}
+# 2026-07-22: is_primary is now NAME-based (first word, case-insensitive) —
+# these are first words of "AT Plant Name" tab entries, not Plant Codes.
+# Matches rows 0/1/2/3/4's PlantName values (Aditya/Roorkee/Sidhi/Dalla/Vikram).
+primary_plant_first_words = {"ADITYA", "ROORKEE", "SIDHI", "DALLA", "VIKRAM"}
+# XSwift Plant Name reference map, keyed by Plant Code — row 0 (6910) has a
+# matching registered name -> TRUE; row 1 (6966) has a deliberately WRONG
+# registered name -> FALSE; other codes are absent -> "NA".
+xswift_plant_name_map_test = {"6910": "Aditya Loading", "6966": "Some Other Name"}
 
 cfg = Config(mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."))
 
-result = build_analysis_columns(mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes)
+result = build_analysis_columns(
+    mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist,
+    primary_plant_first_words, xswift_plant_name_map_test,
+)
 result = reorder_to_final_layout(result)
 
 checks = [
@@ -97,6 +111,9 @@ checks = [
     ("row3 SAP-AI Remark == 'AI is blank'", result.loc[3, NEW_SAP_AI_REMARK] == "AI is blank"),
     ("row4 SAP-AI Remark == '-20 to 20'", result.loc[4, NEW_SAP_AI_REMARK] == "-20 to 20"),
     ("row4 AI check == 'Available'", result.loc[4, NEW_AI_CHECK] == "Available"),
+    ("row0 XSwift Plant Name Match == 'TRUE' (registered name matches)", result.loc[0, NEW_XSWIFT_PLANT_NAME_MATCH] == "TRUE"),
+    ("row1 XSwift Plant Name Match == 'FALSE' (registered name differs)", result.loc[1, NEW_XSWIFT_PLANT_NAME_MATCH] == "FALSE"),
+    ("row2 XSwift Plant Name Match == 'NA' (code not in reference map)", result.loc[2, NEW_XSWIFT_PLANT_NAME_MATCH] == "NA"),
 ]
 
 print(f"{'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} checks passed\n")
@@ -119,8 +136,7 @@ consignment = pd.DataFrame({
     "SAP PGI No": ["P_MISSING_1", "P1", "P_MISSING_2"],  # P1 exists in mtr (row0 of synthetic mtr above)
     "Plant Code": ["6910", "6910", "9999"],  # 6910 is primary (Aditya), 9999 is not
 })
-primary_codes_test = {"6910", "6966", "6951", "6633-3301", "6911"}
-repush = run_task1_trip_repush(consignment, mtr, primary_codes_test)
+repush = run_task1_trip_repush(consignment, mtr, primary_plant_first_words)
 repush_checks = [
     ("Trip Repush includes primary+missing (P_MISSING_1)", "P_MISSING_1" in set(repush["SAP PGI No"])),
     ("Trip Repush excludes primary+present-in-MTR (P1)", "P1" not in set(repush["SAP PGI No"])),
@@ -159,10 +175,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # AT "dashboard" sheet
     at_data = pd.DataFrame({
-        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co"],
-        "Share": ["Veh Share", "Veh Share", "Veh Share"],
-        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT"],
-        "Status": ["Idle", "Idle", "Idle"],
+        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co", "Aditya Raw Material"],
+        "Share": ["Veh Share", "Veh Share", "Veh Share", "Veh Share"],
+        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT", "V_ONLY_AT_NAME_VARIANT"],
+        "Status": ["Idle", "Idle", "Idle", "Idle"],
     })
     at_path = tmpdir / "at.xlsx"
     at_data.to_excel(at_path, sheet_name="dashboard", index=False)
@@ -171,7 +187,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
         xswift_live_dashboard_xlsx=xswift_path, at_live_dashboard_xlsx=at_path,
     )
-    mapping_result = run_task1_mapping(cfg_mapping, primary_plant_companies={"ADITYA CEMENT WORKS"})
+    mapping_result = run_task1_mapping(cfg_mapping, primary_plant_first_words={"ADITYA"})
 
     not_in_at = set(mapping_result["Not in AT"]["Vehicle No"])
     not_in_swift = set(mapping_result["Not in Swift"]["Vehicle"])
@@ -184,6 +200,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         ("Not in Swift includes AT-only primary-plant vehicle", "V_ONLY_AT" in not_in_swift),
         ("Not in Swift EXCLUDES non-primary-plant AT vehicle", "V_NONPRIMARY_ONLY_AT" not in not_in_swift),
         ("Not in Swift excludes vehicle present on both", "V_BOTH" not in not_in_swift),
+        ("Not in Swift includes AT company-name-variant vehicle (first-word match fix)", "V_ONLY_AT_NAME_VARIANT" in not_in_swift),
     ]
     print(f"\n--- Mapping issue checks ---")
     for desc, passed in mapping_checks:

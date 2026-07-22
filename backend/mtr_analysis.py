@@ -149,6 +149,7 @@ NEW_MATCH = "Match"
 NEW_AI_CHECK = "AI check"
 NEW_SAP_AI = "SAP-AI"
 NEW_SAP_AI_REMARK = "SAP-AI Remark"
+NEW_XSWIFT_PLANT_NAME_MATCH = "XSwift Plant Name Match"  # added 2026-07-22, appended at the end
 
 # Stamp Status values that gate several checks (confirmed from notes)
 STAMP_STATUSES_FOR_CHECKS = {"Verified", "Low Confidence"}
@@ -160,6 +161,7 @@ CONS_DESTINATION = "Destination"
 CONS_SAP_LEAD_DIST = "SAP Lead Distance (Kms)"
 CONS_PLANT_CODE = "Plant Code"
 CONS_VEHICLE = "Vehicle"
+CONS_COMPANY = "Company"
 
 # --- Primary Plants List columns ---
 PLANTS_COMPANY_COL = "Company"
@@ -355,6 +357,42 @@ def _first_n_chars_match(a: pd.Series, b: pd.Series, n: int = 4) -> pd.Series:
     return a_norm == b_norm
 
 
+def _first_word_series(s: pd.Series) -> pd.Series:
+    """Uppercase, strip, and take just the first whitespace-separated
+    word of each value — e.g. "Baga Loading" -> "BAGA". CONFIRMED
+    2026-07-22: needed because the Primary Plants List's "AT Plant Name"
+    tab names plants like "Baga Cement Works" while raw MTR's own
+    "Plant name" field / the Consignment Report's "Company" field name
+    the SAME plant "Baga Loading" / "Baga Cement Works" respectively —
+    a full-string match finds almost nothing; matching the first WHOLE
+    word (not a fixed character count — explicitly NOT the
+    _first_n_chars_match() pattern used elsewhere) does.
+    """
+    return s.astype(str).str.strip().str.upper().str.split().str[0].fillna("")
+
+
+def _first_word(name) -> str:
+    """Scalar version of _first_word_series(), for building a lookup set
+    from a plain Python iterable (not a pandas Series)."""
+    if not isinstance(name, str):
+        return ""
+    stripped = name.strip()
+    return stripped.upper().split()[0] if stripped else ""
+
+
+def _normalize_plant_code(v) -> str:
+    """Plant Codes in the "XSwift Plant Name" tab come through as a mix
+    of text codes ('BA01') and numbers Excel stored as floats (6975.0)
+    — normalize both to the same plain-text form ('BA01', '6975') so
+    they compare equal to the string-typed Plant Code in raw MTR/
+    Consignment data."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
 # =============================================================================
 # Step 1: Load reference data (Consignment Report + Primary Plants List)
 # =============================================================================
@@ -424,25 +462,57 @@ def load_primary_plant_codes(path: Path) -> set[str]:
 
 
 def load_primary_plant_companies(path: Path) -> set[str]:
-    """Same source file as load_primary_plant_codes(), but returns the
-    normalized COMPANY NAMES instead of codes — needed for
-    run_task1_mapping(), which matches against AT's "Company Name" field
-    (a text name, not a code). Normalized to upper-case for matching
+    """CHANGED 2026-07-22 — the Primary Plants List was restructured: the
+    old single "Sheet1" (Company + Plant Code, code-based) is deprecated
+    in favor of two new tabs. This function now reads the "AT Plant Name"
+    tab (a single column of primary plant/company names) instead of
+    Sheet1 — used for run_task1_mapping()'s AT "Company Name" filter and
+    as the base for the first-word plant-name matching used elsewhere
+    (see _first_word()/is_primary in build_analysis_columns() and
+    run_task1_trip_repush()). Normalized to upper-case for matching
     against AT's `_UTCL(P)`/`_UTCL(T)`-suffixed company names.
     """
-    log.info("Loading Primary Plants List (company names) from %s", path)
-    df = pd.read_excel(path, sheet_name="Sheet1", dtype=str)
-    header_row_idx = df[df.iloc[:, 0] == PLANTS_COMPANY_COL].index
-    if len(header_row_idx) == 0:
-        company_col = df[PLANTS_COMPANY_COL] if PLANTS_COMPANY_COL in df.columns else df.iloc[:, 0]
-    else:
-        data = df.iloc[header_row_idx[0] + 1:]
-        company_col = data.iloc[:, 0]
+    log.info("Loading Primary Plants List (company names) from %s, sheet 'AT Plant Name'", path)
+    df = pd.read_excel(path, sheet_name="AT Plant Name", dtype=str)
+    company_col = df.iloc[:, 0]
 
     companies = set(company_col.dropna().astype(str).str.strip().str.upper())
     companies.discard("")
     log.info("Loaded %d primary plant company names", len(companies))
     return companies
+
+
+def load_primary_plant_first_words(path: Path) -> set[str]:
+    """Derives the first-word set used for is_primary matching (see
+    _first_word()) directly from load_primary_plant_companies() — same
+    "AT Plant Name" tab, just reduced to first words instead of full
+    names, so there's only one place that reads that tab."""
+    companies = load_primary_plant_companies(path)
+    first_words = {_first_word(c) for c in companies}
+    first_words.discard("")
+    return first_words
+
+
+def load_xswift_plant_name_map(path: Path) -> dict[str, str]:
+    """Reads the "XSwift Plant Name" tab (columns: XSwift Plant Name,
+    Plant Code) — a reference mapping used to add the new "XSwift Plant
+    Name Match" column to MTR Analysis: for each row's Plant Code, look
+    up the officially-registered XSwift Plant Name here and compare it
+    against that row's own (live-exported) Plant name field. Unlike the
+    AT Plant Name tab, this one's naming convention already matches raw
+    MTR's own Plant name style (e.g. both say "Baga Loading"), confirmed
+    2026-07-22 — so the comparison this feeds is a literal exact match,
+    not first-word matching.
+    """
+    log.info("Loading XSwift Plant Name reference map from %s", path)
+    df = pd.read_excel(path, sheet_name="XSwift Plant Name")
+    plant_code_to_name: dict[str, str] = {}
+    for name, code in zip(df.iloc[:, 0], df.iloc[:, 1]):
+        code_norm = _normalize_plant_code(code)
+        if code_norm and isinstance(name, str) and name.strip():
+            plant_code_to_name[code_norm] = name.strip()
+    log.info("Loaded %d XSwift plant-code -> plant-name entries", len(plant_code_to_name))
+    return plant_code_to_name
 
 
 # =============================================================================
@@ -471,12 +541,20 @@ def load_raw_mtr(path: Path, chunksize: int | None = None) -> pd.DataFrame:
 def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
                             city_code_to_destination: dict,
                             sap_pgi_to_lead_dist: dict,
-                            primary_plant_codes: set[str]) -> pd.DataFrame:
+                            primary_plant_first_words: set[str],
+                            xswift_plant_name_map: dict[str, str] | None = None) -> pd.DataFrame:
     df = mtr.copy()
     n = len(df)
     log.info("Building analysis columns for %d rows", n)
 
-    is_primary = df[COL_PLANT_CODE].isin(primary_plant_codes)
+    # CHANGED 2026-07-22: is_primary is now NAME-based (first word of
+    # Plant name, case-insensitive), not Plant-Code-based — the Primary
+    # Plants List's new "AT Plant Name" tab has no codes at all, and its
+    # naming convention ("Baga Cement Works") differs from raw MTR's own
+    # Plant name field ("Baga Loading"), so this compares first WHOLE
+    # words only (see _first_word_series() docstring), not a full-string
+    # or fixed-character-count match.
+    is_primary = _first_word_series(df[COL_PLANT_NAME]).isin(primary_plant_first_words)
 
     # --- Date and time = INT(PGI Date & Time) i.e. date part only ---
     pgi_dt = pd.to_datetime(df[COL_PGI_DATETIME], errors="coerce", format="mixed")
@@ -592,6 +670,25 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     sap_ai_remark = sap_ai_remark.mask(low, "AI usages is low")
     df[NEW_SAP_AI_REMARK] = sap_ai_remark
 
+    # --- XSwift Plant Name Match (added 2026-07-22, appended at the end) ---
+    # For each row's Plant Code, look up the officially-registered
+    # XSwift Plant Name (from the Primary Plants List's "XSwift Plant
+    # Name" tab) and compare it — literal exact match, not first-word
+    # (see load_xswift_plant_name_map() docstring for why) — against
+    # this row's own live-exported Plant name. Same NA/TRUE/FALSE string
+    # convention as Dest. Match / Match elsewhere in this file.
+    xswift_plant_name_map = xswift_plant_name_map or {}
+    plant_code_norm = df[COL_PLANT_CODE].astype(str).str.strip()
+    registered_name = plant_code_norm.map(xswift_plant_name_map)
+    registered_is_na = registered_name.isna()
+    name_matches = (
+        df[COL_PLANT_NAME].astype(str).str.strip().str.upper()
+        == registered_name.astype(str).str.strip().str.upper()
+    )
+    df[NEW_XSWIFT_PLANT_NAME_MATCH] = np.select(
+        [registered_is_na, name_matches], ["NA", "TRUE"], default="FALSE"
+    )
+
     log.info("Analysis columns built.")
     return df
 
@@ -632,7 +729,7 @@ def reorder_to_final_layout(df: pd.DataFrame) -> pd.DataFrame:
         "AI Repaired Distance", NEW_AI_CHECK, NEW_SAP_AI, NEW_SAP_AI_REMARK,
         "Geofence Hit/miss",
         "Mother Geofence Start Time", "Mother Geofence End Time", "Mother Geofence Detention",
-        "Billing Status",
+        "Billing Status", NEW_XSWIFT_PLANT_NAME_MATCH,
     ]
     missing = [c for c in final_order if c not in df.columns]
     if missing:
@@ -707,7 +804,7 @@ def build_all_pivots(df: pd.DataFrame) -> dict[str, list[tuple[str, pd.DataFrame
 # =============================================================================
 
 def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
-                           primary_plant_codes: set[str]) -> pd.DataFrame:
+                           primary_plant_first_words: set[str]) -> pd.DataFrame:
     """CONFIRMED LOGIC (2026-07-20) — reproduces Trip Repush - <date>.xlsx.
 
     Verified empirically: every SAP PGI No in the real Trip Repush output
@@ -718,13 +815,14 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
     the real output was a primary plant). Output = the full original
     Consignment Report row (all columns unchanged), not a reduced set.
 
-    Unlike run_task1_mapping() below (still ON HOLD), this filter is
-    fully confirmed — Consignment Report has a real `Plant Code` column,
-    so this matches by exact code against the Primary Plants List rather
-    than the fuzzy company-name matching Mapping issue would need.
+    CHANGED 2026-07-22: the primary-plant filter is now NAME-based (first
+    word of Consignment Report's Company field, matched against the
+    Primary Plants List's "AT Plant Name" tab), not Plant-Code-based —
+    that tab has no codes at all anymore. Same first-word matching as
+    build_analysis_columns()'s is_primary — see _first_word_series().
     """
     log.info("Running Task 1: Trip Repush")
-    is_primary = consignment[CONS_PLANT_CODE].isin(primary_plant_codes)
+    is_primary = _first_word_series(consignment[CONS_COMPANY]).isin(primary_plant_first_words)
     mtr_pgi_set = set(mtr[COL_SAP_PGI_NO].dropna().astype(str).str.strip())
     missing_from_xswift = ~consignment[CONS_SAP_PGI_NO].astype(str).str.strip().isin(mtr_pgi_set)
 
@@ -733,7 +831,7 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
     return result
 
 
-def run_task1_mapping(cfg: Config, primary_plant_companies: set[str]) -> dict[str, pd.DataFrame]:
+def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str]) -> dict[str, pd.DataFrame]:
     """CONFIRMED — UN-HELD 2026-07-20. Reproduces the candidate list behind
     Mapping_issue_-_20_July.xlsx: vehicles present on one live dashboard
     (AT or XSwift) but not the other.
@@ -752,8 +850,14 @@ def run_task1_mapping(cfg: Config, primary_plant_companies: set[str]) -> dict[st
       that field was silently dropping 23/70 real answers).
     - AT's Live Trip Dashboard (`at_live_dashboard_xlsx`) DOES need the
       primary-plant filter — AT's platform spans many non-UTCL client
-      companies. Match by normalized `Company Name` against the Primary
-      Plants List (strip `_UTCL(P)`/`_UTCL(T)` suffixes).
+      companies. Match by first word of `Company Name` against
+      `primary_plant_first_words` (same convention as
+      build_analysis_columns()/run_task1_trip_repush() — see
+      _first_word_series()), NOT exact full-name matching. Fixed
+      2026-07-22: exact-match-after-suffix-stripping was missing AT
+      company-name variants like "Aligarh Cement Raw Material" /
+      "Rajpura Cement Raw Material" that don't equal the Primary Plants
+      List's "...Cement Works" entries but are the same primary plant.
     - "Not in AT" additionally filtered to XSwift `Vehicle Status !=
       "Online"` (i.e. Offline/Idle) — cuts candidates from 391 to 329
       with NO loss of recall (confirmed: all 70 real vehicles have
@@ -776,14 +880,6 @@ def run_task1_mapping(cfg: Config, primary_plant_companies: set[str]) -> dict[st
 
     log.info("Running Task 1: Mapping issue (validated, 100%% recall against real output)")
 
-    def _normalize_plant(name) -> str:
-        if not isinstance(name, str):
-            return ""
-        n = name.upper()
-        for suffix in ["_UTCL(P)", "_UTCL(T)", "_UTCL"]:
-            n = n.replace(suffix, "")
-        return n.strip()
-
     # XSwift side: skiprows=2 skips the "Name:"/"Report:" banner rows before
     # the real header (confirmed from the real file's raw structure).
     xswift_df = pd.read_excel(
@@ -794,8 +890,13 @@ def run_task1_mapping(cfg: Config, primary_plant_companies: set[str]) -> dict[st
     # NO plant filter on XSwift side — see docstring.
     xswift_vehicles = set(xswift_df["Vehicle No"].dropna().astype(str).str.strip())
 
-    # Primary-plant filter on AT side only.
-    at_df = at_df[at_df["Company Name"].map(_normalize_plant).isin(primary_plant_companies)]
+    # Primary-plant filter on AT side only — matched by first word, same
+    # convention as build_analysis_columns()/run_task1_trip_repush() (see
+    # _first_word_series() docstring), not exact full-name matching. AT's
+    # "Company Name" field has variants like "Aligarh Cement Raw Material"
+    # that don't equal the Primary Plants List's "Aligarh Cement Works" but
+    # share the same first word and are the same primary plant.
+    at_df = at_df[_first_word_series(at_df["Company Name"]).isin(primary_plant_first_words)]
     at_vehicles = set(at_df["Vehicle"].dropna().astype(str).str.strip())
 
     not_in_at_mask = xswift_df["Vehicle No"].astype(str).str.strip().isin(xswift_vehicles - at_vehicles)
@@ -926,8 +1027,12 @@ def run(cfg: Config) -> None:
         cfg.xswift_live_dashboard_xlsx, cfg.at_live_dashboard_xlsx,
     )
 
-    primary_plant_codes = load_primary_plant_codes(cfg.primary_plants_xlsx)
-    primary_plant_codes = (primary_plant_codes - cfg.task1_exclude_plant_codes) | cfg.task1_include_extra_plant_codes
+    # NOTE 2026-07-22: task1_exclude_plant_codes/task1_include_extra_plant_codes
+    # (Config fields) are Plant-Code sets — no longer meaningful now that
+    # primary-plant matching is name-based (see load_primary_plant_first_words()).
+    # Left unused here rather than removed; both default to empty anyway.
+    primary_plant_first_words = load_primary_plant_first_words(cfg.primary_plants_xlsx)
+    xswift_plant_name_map = load_xswift_plant_name_map(cfg.primary_plants_xlsx)
 
     # Load the full Consignment Report once — used for both the MTR Analysis
     # lookups AND Trip Repush (avoids reading this 60MB+ file twice).
@@ -938,7 +1043,8 @@ def run(cfg: Config) -> None:
 
     # --- Output 1: "Output Final - MTR Analysis" ---
     analyzed = build_analysis_columns(
-        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist,
+        primary_plant_first_words, xswift_plant_name_map,
     )
     analyzed = reorder_to_final_layout(analyzed)
     pivots_by_sheet = build_all_pivots(analyzed)
@@ -952,7 +1058,7 @@ def run(cfg: Config) -> None:
     # history matters in practice, extend this to open the existing
     # workbook with openpyxl (NOT xlsxwriter, which can't append to an
     # existing file) and add a new tab rather than overwrite.
-    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_first_words)
     with pd.ExcelWriter(cfg.output_dir / f"Trip_Repush_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=cfg.run_date_label[:31], index=False)
 
@@ -963,8 +1069,7 @@ def run(cfg: Config) -> None:
     # see run_task1_mapping() docstring); this is a deliberate, documented
     # tradeoff, not a bug.
     if cfg.xswift_live_dashboard_xlsx and cfg.at_live_dashboard_xlsx:
-        primary_plant_companies = load_primary_plant_companies(cfg.primary_plants_xlsx)
-        task1_results = run_task1_mapping(cfg, primary_plant_companies)
+        task1_results = run_task1_mapping(cfg, primary_plant_first_words)
         if task1_results:
             with pd.ExcelWriter(cfg.output_dir / f"Mapping_issue_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
                 for name, df in task1_results.items():
@@ -1000,11 +1105,11 @@ def run_in_memory(
 
     validate_inputs(mtr_csv, consignment_xlsx, xswift_live_dashboard_xlsx, at_live_dashboard_xlsx)
 
-    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
-    primary_plant_codes = (
-        (primary_plant_codes - (task1_exclude_plant_codes or set()))
-        | (task1_include_extra_plant_codes or set())
-    )
+    # NOTE 2026-07-22: task1_exclude_plant_codes/task1_include_extra_plant_codes
+    # are Plant-Code sets — no longer meaningful now that primary-plant
+    # matching is name-based. Left as unused parameters rather than removed.
+    primary_plant_first_words = load_primary_plant_first_words(io.BytesIO(primary_plants_xlsx))
+    xswift_plant_name_map = load_xswift_plant_name_map(io.BytesIO(primary_plants_xlsx))
 
     consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
     city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
@@ -1022,7 +1127,8 @@ def run_in_memory(
 
     # --- Output 1: "Output Final - MTR Analysis" ---
     analyzed = build_analysis_columns(
-        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist,
+        primary_plant_first_words, xswift_plant_name_map,
     )
     analyzed = reorder_to_final_layout(analyzed)
     pivots_by_sheet = build_all_pivots(analyzed)
@@ -1031,7 +1137,7 @@ def run_in_memory(
     outputs[f"MTR_Analysis_-_{run_date_label}.xlsx"] = buf.getvalue()
 
     # --- Output 2: "Output Trip creation - Trip Repush" ---
-    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_first_words)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
@@ -1039,10 +1145,9 @@ def run_in_memory(
 
     # --- Output 3: "Output Mapping issue" ---
     if xswift_live_dashboard_xlsx and at_live_dashboard_xlsx:
-        primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
         cfg.xswift_live_dashboard_xlsx = io.BytesIO(xswift_live_dashboard_xlsx)
         cfg.at_live_dashboard_xlsx = io.BytesIO(at_live_dashboard_xlsx)
-        task1_results = run_task1_mapping(cfg, primary_plant_companies)
+        task1_results = run_task1_mapping(cfg, primary_plant_first_words)
         if task1_results:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
@@ -1079,7 +1184,8 @@ def run_mtr_analysis_report(
     """
     validate_inputs(mtr_csv=mtr_csv, consignment_xlsx=consignment_xlsx)
 
-    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
+    primary_plant_first_words = load_primary_plant_first_words(io.BytesIO(primary_plants_xlsx))
+    xswift_plant_name_map = load_xswift_plant_name_map(io.BytesIO(primary_plants_xlsx))
     consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
     city_code_to_destination, sap_pgi_to_lead_dist = build_consignment_lookups(consignment_full)
     mtr = load_raw_mtr(io.BytesIO(mtr_csv))
@@ -1089,7 +1195,8 @@ def run_mtr_analysis_report(
         run_date_label=run_date_label,
     )
     analyzed = build_analysis_columns(
-        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist, primary_plant_codes
+        mtr, cfg, city_code_to_destination, sap_pgi_to_lead_dist,
+        primary_plant_first_words, xswift_plant_name_map,
     )
     analyzed = reorder_to_final_layout(analyzed)
 
@@ -1104,11 +1211,11 @@ def run_trip_repush_report(
     """Produces Trip_Repush_-_<date>.xlsx — one tab, named after run_date_label."""
     validate_inputs(mtr_csv=mtr_csv, consignment_xlsx=consignment_xlsx)
 
-    primary_plant_codes = load_primary_plant_codes(io.BytesIO(primary_plants_xlsx))
+    primary_plant_first_words = load_primary_plant_first_words(io.BytesIO(primary_plants_xlsx))
     consignment_full = load_consignment_report_full(io.BytesIO(consignment_xlsx))
     mtr = load_raw_mtr(io.BytesIO(mtr_csv))
 
-    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_codes)
+    trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_first_words)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
@@ -1126,14 +1233,14 @@ def run_mapping_issue_report(
         at_live_dashboard_xlsx=at_live_dashboard_xlsx,
     )
 
-    primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
+    primary_plant_first_words = load_primary_plant_first_words(io.BytesIO(primary_plants_xlsx))
     cfg = Config(
         mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
         xswift_live_dashboard_xlsx=io.BytesIO(xswift_live_dashboard_xlsx),
         at_live_dashboard_xlsx=io.BytesIO(at_live_dashboard_xlsx),
         run_date_label=run_date_label,
     )
-    task1_results = run_task1_mapping(cfg, primary_plant_companies)
+    task1_results = run_task1_mapping(cfg, primary_plant_first_words)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
