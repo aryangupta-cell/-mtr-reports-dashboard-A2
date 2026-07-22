@@ -669,11 +669,16 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     dest_slab = pd.Series("", index=df.index)
     issue_mask = in_stamp_scope & dest_exit_blank & ~dest_detention_zero_or_null
     dest_slab = dest_slab.mask(issue_mask, "issue")
-    # FIXED 2026-07-22, confirmed directly against a real file: "vehicle
-    # still in site" is NOT gated by Stamp Status, unlike every other
-    # case in this column — real data has 1262 such rows with Stamp
-    # Status "Pending" that still get this label.
-    still_at_site_mask = dest_detention_zero_or_null & dest_exit_blank & (dest_slab == "")
+    # NOTE 2026-07-22: an attempt to un-gate "vehicle still in site" from
+    # Stamp Status (to catch 1262 real rows with Stamp Status "Pending"
+    # that still get this label) was reverted — it fixed those 1262 but
+    # broke 47088 OTHERS that should stay blank under the same
+    # conditions (confirmed: identical Dest Entry/Exit/Detention/Onward
+    # Status/Route Name values in both the correctly-labeled and
+    # incorrectly-labeled groups — the real discriminator isn't visible
+    # in any input column checked so far). Gating restored; the 1262-row
+    # gap is a known, unresolved minority case pending business input.
+    still_at_site_mask = in_stamp_scope & dest_detention_zero_or_null & dest_exit_blank & (dest_slab == "")
     dest_slab = dest_slab.mask(still_at_site_mask, "vehicle still in site")
     both_present_mask = in_stamp_scope & ~dest_exit_blank & ~dest_entry_blank & (dest_slab == "")
     dest_slab = dest_slab.mask(
@@ -991,11 +996,33 @@ YELLOW_HEADER_COLUMNS = {
 }
 
 # Columns confirmed (from real data-row cell styles) to use Excel's
-# datetime number format (numFmtId 22, "m/d/yy h:mm").
-DATETIME_FORMAT_COLUMNS = {"PGI Date & Time", NEW_DATE_AND_TIME, "Plant Entry", "Plant Exit"}
+# datetime number format (numFmtId 22, "m/d/yy h:mm") — real values are
+# actual Excel datetimes, not text. FIXED 2026-07-22: these raw-MTR
+# passthrough columns were being written as plain text ("20 Jul 26
+# 09:37"), which the num_format below has no effect on (a number format
+# only changes how a numeric/date cell renders — it does nothing to a
+# text cell). Expanded from the original 4 to every full-datetime column
+# confirmed against the real file's actual cell types (via openpyxl,
+# read_only+data_only). Parsed into real datetimes in write_xlsx() right
+# before writing — NOT upstream, so blank-detection logic elsewhere in
+# build_analysis_columns keeps operating on the original text values.
+DATETIME_FORMAT_COLUMNS = {
+    "PGI Date & Time", NEW_DATE_AND_TIME, "Plant Entry", "Plant Exit",
+    "Yard IN", "Yard Out", "Dest Entry Time", "Dest Exit Time",
+    "Destination Proximity End Time",
+}
 
-# Column confirmed to use Excel's time-duration format (numFmtId 20, "h:mm").
-DURATION_FORMAT_COLUMNS = {"Plant Detention"}
+# Columns confirmed to use Excel's plain "h:mm" time format — real cells
+# are datetime.time (< 24h) or datetime.timedelta (>= 24h) depending on
+# magnitude when read back via openpyxl, both driven by the same
+# day-fraction float + this format string (confirmed empirically: a
+# bracket format like "[h]:mm" instead makes openpyxl read the cell back
+# as a timedelta even for <24h values, giving an unpadded hour in str()
+# — "0:10:00" instead of the real file's "00:10:00").
+DURATION_FORMAT_COLUMNS = {
+    "Plant Detention", "Yard detention", "Dest Detention",
+    "Destination Ageing", "Onward Duration",
+}
 
 
 def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
@@ -1049,6 +1076,25 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
             if not pivots:
                 pd.DataFrame().to_excel(writer, sheet_name=sheet_name)
 
+        # Parse text passthrough columns into real datetime/duration
+        # values right before writing (does NOT affect earlier business
+        # logic, which runs on the original text df) — see
+        # DATETIME_FORMAT_COLUMNS/DURATION_FORMAT_COLUMNS docstrings.
+        main_df = main_df.copy()
+        overflow_masks: dict[str, pd.Series] = {}
+        for col in DATETIME_FORMAT_COLUMNS:
+            if col in main_df.columns:
+                parsed = pd.to_datetime(main_df[col], format="%d %b %y %H:%M", errors="coerce")
+                # Real file's blank cells are the literal text " ", not an
+                # empty cell — keep that convention instead of NaT.
+                main_df[col] = parsed.astype(object).where(parsed.notna(), " ")
+        for col in DURATION_FORMAT_COLUMNS:
+            if col in main_df.columns:
+                minutes = _minutes_from_excel_duration(main_df[col])
+                frac = minutes / (24 * 60)
+                overflow_masks[col] = frac >= 1
+                main_df[col] = frac.astype(object).where(minutes.notna(), " ")
+
         main_sheet_name = main_sheet_name[:31]
         main_df.to_excel(writer, sheet_name=main_sheet_name, index=False)
         worksheet = writer.sheets[main_sheet_name]
@@ -1056,6 +1102,15 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
         yellow_header_format = workbook.add_format({"bg_color": "#FFFF00", "bold": False})
         datetime_format = workbook.add_format({"num_format": "m/d/yy h:mm"})
         duration_format = workbook.add_format({"num_format": "h:mm"})
+        # FIXED 2026-07-22, confirmed cell-by-cell against a real file:
+        # duration cells use "h:mm" when under 24h but "[h]:mm:ss" (elapsed
+        # time, with seconds) once the value reaches 1 day or more — a
+        # column-wide format can't express both, and xlsxwriter's
+        # conditional_format doesn't change the cell's actual stored
+        # number format (only how Excel highlights it — openpyxl still
+        # reads the base "h:mm"), so the >=1-day cells are individually
+        # re-written with the overflow format after the bulk write.
+        duration_overflow_format = workbook.add_format({"num_format": "[h]:mm:ss"})
 
         for col_idx, col_name in enumerate(main_df.columns):
             if col_name in YELLOW_HEADER_COLUMNS:
@@ -1064,6 +1119,13 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
                 worksheet.set_column(col_idx, col_idx, None, datetime_format)
             elif col_name in DURATION_FORMAT_COLUMNS:
                 worksheet.set_column(col_idx, col_idx, None, duration_format)
+                mask = overflow_masks.get(col_name)
+                if mask is not None and mask.any():
+                    for row_idx in np.flatnonzero(mask.to_numpy()):
+                        worksheet.write_number(
+                            row_idx + 1, col_idx, main_df[col_name].iat[row_idx],
+                            duration_overflow_format,
+                        )
 
     # path may be a real file path (CLI/disk mode) or an in-memory buffer
     # (see run_in_memory() below) — size it either way without touching
