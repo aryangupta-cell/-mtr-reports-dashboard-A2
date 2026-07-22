@@ -570,26 +570,42 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
         _is_blank(df[COL_TRANSPORTER_NAME]), "Not Available", "Available"
     )
 
-    # --- Zone Remark: primary plant + Zone blank -> "Zone enable for it" ---
+    # --- Zone Remark: Banswara Loading + Zone blank -> "Zone enable" ---
+    # FIXED 2026-07-22, confirmed directly against a real file: the flag
+    # is NOT primary-plant-based (Banswara isn't even in the primary
+    # plant list) — of 10,607 real rows with a blank Zone across every
+    # plant, only "Banswara Loading" (851 rows) ever gets flagged, and
+    # ALL its blank-Zone rows get flagged. Label text is "Zone enable",
+    # not "Zone enable for it". Business confirmed this is a Banswara-
+    # specific flag, not a general rule — revisit if more plants need it.
+    is_banswara = _first_word_series(df[COL_PLANT_NAME]) == "BANSWARA"
     df[NEW_ZONE_REMARK] = np.where(
-        is_primary & _is_blank(df[COL_ZONE]), "Zone enable for it", ""
+        is_banswara & _is_blank(df[COL_ZONE]), "Zone enable", ""
     )
 
-    # --- Yard Detention Slab ---
+    # --- Yard Detention Slab (gated by Stamp Status) ---
+    # FIXED 2026-07-22, confirmed directly against a real file: this
+    # column is blank for rows outside STAMP_STATUSES_FOR_CHECKS (exactly
+    # 49813 real rows == Rejected + Pending counts) — was computed
+    # unconditionally before. Label text also corrected to match the real
+    # file exactly ("in & out time is blank", "vehicle still in site",
+    # "Not Available" — not "In out both blank"/"Vehicle still in
+    # yard"/"Not available").
+    in_stamp_scope = df[COL_STAMP_STATUS].isin(STAMP_STATUSES_FOR_CHECKS)
     yard_in_blank = _is_blank(df[COL_YARD_IN])
     yard_out_blank = _is_blank(df[COL_YARD_OUT])
     yard_minutes = _minutes_from_excel_duration(df[COL_YARD_DETENTION])
     yard_zero = df[COL_YARD_DETENTION].astype(str).str.strip().isin(["0", "0:00", "00:00", "0.0"])
 
     yard_slab = pd.Series("", index=df.index)
-    yard_slab = yard_slab.mask(yard_in_blank & yard_out_blank, "In out both blank")
-    yard_slab = yard_slab.mask(yard_in_blank & ~yard_out_blank, "Problem")
-    yard_slab = yard_slab.mask(~yard_in_blank & yard_out_blank, "Vehicle still in yard")
+    yard_slab = yard_slab.mask(in_stamp_scope & yard_in_blank & yard_out_blank, "in & out time is blank")
+    yard_slab = yard_slab.mask(in_stamp_scope & yard_in_blank & ~yard_out_blank, "Problem")
+    yard_slab = yard_slab.mask(in_stamp_scope & ~yard_in_blank & yard_out_blank, "vehicle still in site")
     both_present = ~yard_in_blank & ~yard_out_blank
-    yard_slab = yard_slab.mask(both_present & yard_zero, "Not available")
-    remaining = both_present & ~yard_zero & (yard_slab == "")
+    yard_slab = yard_slab.mask(in_stamp_scope & both_present & yard_zero, "Not Available")
+    remaining = in_stamp_scope & both_present & ~yard_zero & (yard_slab == "")
     yard_slab = yard_slab.mask(remaining, _slab_from_minutes(yard_minutes, cfg.detention_slab_edges_min))
-    df[NEW_YARD_DETENTION_SLAB] = yard_slab
+    df[NEW_YARD_DETENTION_SLAB] = yard_slab.where(in_stamp_scope, np.nan)
 
     # --- Plant detention Slab ---
     plant_exit_blank = _is_blank(df[COL_PLANT_EXIT])
@@ -622,7 +638,6 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     )
 
     # --- Destination detention slab (gated by Stamp Status) ---
-    in_stamp_scope = df[COL_STAMP_STATUS].isin(STAMP_STATUSES_FOR_CHECKS)
     dest_exit_blank = _is_blank(df[COL_DEST_EXIT])
     dest_entry_blank = _is_blank(df[COL_DEST_ENTRY])
     dest_detention_blank = _is_blank(df[COL_DEST_DETENTION])

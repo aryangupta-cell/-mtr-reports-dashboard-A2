@@ -63,6 +63,19 @@ rows = [
          PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="YY88", Dest="OTHERDEST",
          DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Stamp Verified",
          SapLead="50", GPS="48", AI=SP),
+    # row 6: Banswara Loading + blank Zone -> "Zone enable" (real bug fix:
+    # this is a Banswara-only flag, not primary-plant-based)
+    dict(TripID=7, Vehicle="V7", SAPPGI="P7", PGIDT="20 Jul 26 09:37", Transporter="Foo Carriers", Zone=SP,
+         YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Banswara Loading", PlantCode="9999",
+         PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="YY88", Dest="OTHERDEST",
+         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Stamp Verified",
+         SapLead="50", GPS="48", AI="45"),
+    # row 7: Banswara Loading but Zone PRESENT -> Zone Remark stays blank
+    dict(TripID=8, Vehicle="V8", SAPPGI="P8", PGIDT="20 Jul 26 09:37", Transporter="Foo Carriers", Zone="North A",
+         YardIn=SP, YardOut=SP, YardDet=SP, PlantName="Banswara Loading", PlantCode="9999",
+         PlantEntry="2026-07-20 02:00", PlantExit="2026-07-20 03:00", PlantDet="10:00", DestCode="YY88", Dest="OTHERDEST",
+         DestEntry="2026-07-20 10:00", DestExit="2026-07-20 10:05", DestDet="0:05", Stamp="Stamp Verified",
+         SapLead="50", GPS="48", AI="45"),
 ]
 
 df_raw = pd.DataFrame(rows)
@@ -106,13 +119,13 @@ result = reorder_to_final_layout(result)
 checks = [
     ("row0 Plant detention Slab == 'Loading not merged'", result.loc[0, NEW_PLANT_DETENTION_SLAB] == "Loading not merged"),
     ("row0 Transporter Remark == 'Not Available'", result.loc[0, NEW_TRANSPORTER_REMARK] == "Not Available"),
-    ("row0 Zone Remark == 'Zone enable for it'", result.loc[0, NEW_ZONE_REMARK] == "Zone enable for it"),
-    ("row0 Yard Detention Slab == 'In out both blank'", result.loc[0, NEW_YARD_DETENTION_SLAB] == "In out both blank"),
+    ("row0 Yard Detention Slab is blank (Stamp=Pending, out of scope)", pd.isna(result.loc[0, NEW_YARD_DETENTION_SLAB])),
     ("row0 AT SAP lead distance == '8' (numeric match)", str(result.loc[0, NEW_AT_SAP_LEAD_DIST]) == "8"),
     ("row0 Match == 'TRUE'", result.loc[0, NEW_MATCH] == "TRUE"),
     ("row1 Plant detention Slab == 'vehicle still in plant'", result.loc[1, NEW_PLANT_DETENTION_SLAB] == "vehicle still in plant"),
-    ("row1 Yard Detention Slab == '0-10 min'", result.loc[1, NEW_YARD_DETENTION_SLAB] == "0-10 min"),
+    ("row1 Yard Detention Slab is blank (Stamp=Pending, out of scope)", pd.isna(result.loc[1, NEW_YARD_DETENTION_SLAB])),
     ("row2 Plant detention Slab == 'Above 30 min'", result.loc[2, NEW_PLANT_DETENTION_SLAB] == "Above 30 min"),
+    ("row2 Yard Detention Slab == 'Not Available' (Stamp Verified, in/out present, detention 0)", result.loc[2, NEW_YARD_DETENTION_SLAB] == "Not Available"),
     ("row2 Destination detention slab == '30-45'? check band", result.loc[2, NEW_DEST_DETENTION_SLAB] == "Above 30 min"),
     ("row2 SAP-AI Remark == 'AI usages is high'", result.loc[2, NEW_SAP_AI_REMARK] == "AI usages is high"),
     ("row2 AT destination name == '#N/A' (ZZ.. not in lookup? no XX99)", result.loc[2, NEW_AT_DEST_NAME] == "#N/A"),
@@ -126,6 +139,8 @@ checks = [
     ("row2 XSwift Plant Name Match == 'NA' (code not in reference map)", result.loc[2, NEW_XSWIFT_PLANT_NAME_MATCH] == "NA"),
     ("row5 AI check == 'Not Available' (AI Repaired Distance BLANK, not literal 0)", result.loc[5, NEW_AI_CHECK] == "Not Available"),
     ("row5 SAP-AI Remark == 'AI is blank' (real bug fix: blank must count, not just literal 0)", result.loc[5, NEW_SAP_AI_REMARK] == "AI is blank"),
+    ("row6 Zone Remark == 'Zone enable' (Banswara Loading + blank Zone)", result.loc[6, NEW_ZONE_REMARK] == "Zone enable"),
+    ("row7 Zone Remark is blank (Banswara Loading but Zone present)", result.loc[7, NEW_ZONE_REMARK] == ""),
 ]
 
 print(f"{'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] for c in checks)}/{len(checks)} checks passed\n")
