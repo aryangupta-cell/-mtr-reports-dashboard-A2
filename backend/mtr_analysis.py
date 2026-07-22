@@ -441,8 +441,13 @@ def build_consignment_lookups(consignment: pd.DataFrame) -> tuple[dict, dict]:
     # naturally keeps the LAST value per key, so we reverse before building
     # to replicate "first match wins".
     city_lookup_df = consignment[[CONS_CITY_CODE, CONS_DESTINATION]].dropna(subset=[CONS_CITY_CODE])
+    # .str.strip() FIXED 2026-07-22: raw Consignment Report's Destination
+    # field has stray leading/trailing whitespace on some rows (confirmed
+    # against a real file: "AT destination name" had an extra leading
+    # space the real file doesn't) — the real business process trims it.
+    dest_stripped = city_lookup_df[CONS_DESTINATION].str.strip()
     city_code_to_destination = dict(
-        zip(city_lookup_df[CONS_CITY_CODE][::-1], city_lookup_df[CONS_DESTINATION][::-1])
+        zip(city_lookup_df[CONS_CITY_CODE][::-1], dest_stripped[::-1])
     )
 
     pgi_lookup_df = consignment[[CONS_SAP_PGI_NO, CONS_SAP_LEAD_DIST]].dropna(subset=[CONS_SAP_PGI_NO])
