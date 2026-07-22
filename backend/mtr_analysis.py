@@ -617,24 +617,24 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     plant_slab = pd.Series("", index=df.index)
     plant_slab = plant_slab.mask(plant_exit_blank & ~plant_entry_blank, "vehicle still in plant")
     plant_slab = plant_slab.mask(plant_detention_zero & (plant_slab == ""), "Loading not merged")
-    plant_slab = plant_slab.mask(plant_detention_blank & (plant_slab == ""), "Issue")
+    plant_slab = plant_slab.mask(plant_detention_blank & (plant_slab == ""), "issue")
     remaining = (plant_slab == "") & ~plant_detention_blank & ~plant_detention_zero
     plant_slab = plant_slab.mask(remaining, _slab_from_minutes(plant_minutes, cfg.detention_slab_edges_min))
     df[NEW_PLANT_DETENTION_SLAB] = plant_slab
 
     # --- AT destination name (XLOOKUP replacement) + Dest. Match ---
-    # NOTE: output is the literal strings "TRUE"/"FALSE"/"NA", not Python
-    # booleans. Earlier version used np.where(cond, "NA", bool_array), which
-    # under pandas' string-dtype inference silently coerces True/False into
-    # the STRINGS "True"/"False" once mixed with "NA" in the same column —
-    # confirmed via test_pipeline.py. Made explicit here instead of relying
-    # on that implicit (and confusing) coercion.
+    # FIXED 2026-07-22, confirmed directly against a real file: Dest.
+    # Match's real values are "True"/"False"/blank — NOT "NA" (the real
+    # file has zero rows with the literal string "NA"; the not-found case
+    # is just a blank cell). Same for Match below. XSwift Plant Name
+    # Match keeps "TRUE"/"FALSE"/"NA" since it's a brand-new column with
+    # no real file to verify a casing convention against.
     df[NEW_AT_DEST_NAME] = df[COL_DEST_CODE].map(city_code_to_destination)
     at_dest_is_na = df[NEW_AT_DEST_NAME].isna()
     df[NEW_AT_DEST_NAME] = df[NEW_AT_DEST_NAME].fillna("#N/A")
     name_match = _first_n_chars_match(df[COL_DESTINATION], df[NEW_AT_DEST_NAME])
     df[NEW_DEST_MATCH] = np.select(
-        [at_dest_is_na, name_match], ["NA", "TRUE"], default="FALSE"
+        [at_dest_is_na, name_match], ["", "True"], default="False"
     )
 
     # --- Destination detention slab (gated by Stamp Status) ---
@@ -646,9 +646,13 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
 
     dest_slab = pd.Series("", index=df.index)
     issue_mask = in_stamp_scope & dest_exit_blank & ~dest_detention_zero_or_null
-    dest_slab = dest_slab.mask(issue_mask, "Issue")
-    still_at_site_mask = in_stamp_scope & dest_detention_zero_or_null & dest_exit_blank & (dest_slab == "")
-    dest_slab = dest_slab.mask(still_at_site_mask, "Vehicle still at site")
+    dest_slab = dest_slab.mask(issue_mask, "issue")
+    # FIXED 2026-07-22, confirmed directly against a real file: "vehicle
+    # still in site" is NOT gated by Stamp Status, unlike every other
+    # case in this column — real data has 1262 such rows with Stamp
+    # Status "Pending" that still get this label.
+    still_at_site_mask = dest_detention_zero_or_null & dest_exit_blank & (dest_slab == "")
+    dest_slab = dest_slab.mask(still_at_site_mask, "vehicle still in site")
     both_present_mask = in_stamp_scope & ~dest_exit_blank & ~dest_entry_blank & (dest_slab == "")
     dest_slab = dest_slab.mask(
         both_present_mask, _slab_from_minutes(dest_minutes, cfg.detention_slab_edges_min)
@@ -664,7 +668,7 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     at_lead_numeric = pd.to_numeric(df[NEW_AT_SAP_LEAD_DIST], errors="coerce")
     lead_match = np.isclose(sap_lead_numeric, at_lead_numeric, equal_nan=False)
     df[NEW_MATCH] = np.select(
-        [at_lead_is_na, lead_match], ["NA", "TRUE"], default="FALSE"
+        [at_lead_is_na, lead_match], ["", "True"], default="False"
     )
 
     # --- AI check, SAP-AI, SAP-AI Remark (gated by Stamp Status) ---
@@ -771,10 +775,16 @@ def reorder_to_final_layout(df: pd.DataFrame) -> pd.DataFrame:
             "Raw MTR export column names may have changed — update COL_* "
             "constants and final_order in reorder_to_final_layout()."
         )
+    # FIXED 2026-07-22: extra raw-MTR columns not in the confirmed layout
+    # used to be appended at the end instead of dropped — real output
+    # files only ever have exactly these columns (confirmed: the real
+    # 20-July file has 53, this pipeline's 54 with the new XSwift Plant
+    # Name Match column). Still logged so an unexpected new raw column
+    # is visible, but no longer silently kept in the output.
     extra = [c for c in df.columns if c not in final_order]
     if extra:
-        log.warning("Columns present but not in the confirmed layout (kept at the end): %s", extra)
-    return df[final_order + extra]
+        log.warning("Columns present but not in the confirmed layout (dropped): %s", extra)
+    return df[final_order]
 
 
 # =============================================================================
