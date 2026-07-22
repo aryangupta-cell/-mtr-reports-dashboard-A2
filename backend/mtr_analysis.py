@@ -398,6 +398,19 @@ def _normalize_plant_code(v) -> str:
     return str(v).strip()
 
 
+def _strip_leading_zeros_if_numeric(s: pd.Series) -> pd.Series:
+    """FIXED 2026-07-22, confirmed against a real file: "Transporter
+    Code" and "DI No" are passthrough columns from raw MTR, but the real
+    file's build process reads purely-numeric values as numbers (drops
+    leading zeros — '0002202186' -> '2202186'), while raw MTR's CSV
+    keeps them as zero-padded text. Alphanumeric codes (e.g.
+    '641053C002') are untouched either way, so only strip when the
+    whole string is digits."""
+    is_numeric = s.str.match(r"^\d+$", na=False)
+    stripped = s.where(~is_numeric, s.str.lstrip("0").replace("", "0"))
+    return stripped
+
+
 # =============================================================================
 # Step 1: Load reference data (Consignment Report + Primary Plants List)
 # =============================================================================
@@ -551,6 +564,10 @@ def build_analysis_columns(mtr: pd.DataFrame, cfg: Config,
     df = mtr.copy()
     n = len(df)
     log.info("Building analysis columns for %d rows", n)
+
+    # See _strip_leading_zeros_if_numeric() docstring.
+    df["Transporter Code"] = _strip_leading_zeros_if_numeric(df["Transporter Code"])
+    df["DI No"] = _strip_leading_zeros_if_numeric(df["DI No"])
 
     # CHANGED 2026-07-22: is_primary is now NAME-based (first word of
     # Plant name, case-insensitive), not Plant-Code-based — the Primary
