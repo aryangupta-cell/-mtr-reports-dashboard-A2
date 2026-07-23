@@ -933,6 +933,13 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
     return result
 
 
+# XSwift Live Trip Dashboard's "Vehicle Reg Plant Name" field has a
+# confirmed data-quality quirk: "Khanpur" is spelled "Kahanpur" (letters
+# transposed) — used only in run_task1_mapping()'s XSwift-side filter,
+# not elsewhere, since it's specific to this field/source.
+XSWIFT_PLANT_NAME_TYPO_ALIASES = {"KAHANPUR"}
+
+
 def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
                        primary_plant_companies: set[str]) -> dict[str, pd.DataFrame]:
     """CONFIRMED — UN-HELD 2026-07-20. Reproduces the candidate list behind
@@ -944,13 +951,20 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     remaining gap between candidate count and the real ~70/~10 rows is
     precision, not a missing vehicle):
 
-    - XSwift's Live Trip Dashboard (`xswift_live_dashboard_xlsx`) does
-      NOT need a plant-name filter — per the business contact's own
-      notes, XSwift only carries primary-plant data at all right now, so
-      filtering it by plant name is not just unnecessary but actively
-      wrong (many rows have a blank `Vehicle Reg Plant Name` field even
-      though the vehicle IS a real primary-plant vehicle — filtering on
-      that field was silently dropping 23/70 real answers).
+    - XSwift's Live Trip Dashboard (`xswift_live_dashboard_xlsx`) — FIXED
+      2026-07-23: the earlier "no filter at all" approach was itself too
+      loose, letting through rows explicitly labeled as a different
+      ("Secondary") plant. Filter is now: keep a row if
+      `Vehicle Reg Plant Name` is BLANK (pass-through — many genuine
+      primary-plant rows have this blank, dropping them was the original
+      23/70-recall bug) OR its first word matches
+      `primary_plant_first_words` (same convention as MTR Analysis's
+      Zone Remark / is_primary — see _first_word_series()); exclude rows
+      where the field is present but non-matching (e.g. "Secondary").
+      Confirmed against a real file: this single rule simultaneously
+      fixes 8 Aligarh/Khanpur Khui naming misses, keeps 22 genuine HO/
+      pool-vehicle rows (blank plant name), and excludes 128 Secondary-
+      plant over-matches.
     - AT's Live Trip Dashboard (`at_live_dashboard_xlsx`) DOES need the
       primary-plant filter — AT's platform spans many non-UTCL client
       companies. FIXED 2026-07-23, confirmed against a real file: plain
@@ -1007,9 +1021,30 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     )
     at_df = pd.read_excel(cfg.at_live_dashboard_xlsx, sheet_name="dashboard", dtype=str)
 
-    # NO plant filter on XSwift side — see docstring. Case-insensitive
-    # vehicle matching throughout — see docstring.
-    xswift_vehicles = set(xswift_df["Vehicle No"].dropna().astype(str).str.strip().str.upper())
+    # "Does this vehicle exist anywhere in XSwift" (used by "Not in
+    # Swift"'s diff) must stay based on the FULL, unfiltered XSwift
+    # sheet — a vehicle logged under a non-primary/"Secondary" plant
+    # label still genuinely exists in XSwift. Case-insensitive throughout.
+    xswift_vehicles_all = set(xswift_df["Vehicle No"].dropna().astype(str).str.strip().str.upper())
+
+    # XSwift-side plant filter (restricts which XSwift rows are eligible
+    # to appear as "Not in AT" candidates, NOT the existence-set above):
+    # blank Vehicle Reg Plant Name passes through, non-blank must
+    # first-word-match a primary plant — see docstring. XSWIFT_PLANT_NAME_TYPO_ALIASES
+    # covers a confirmed data-quality quirk specific to this field: real
+    # rows spell "Khanpur" as "Kahanpur" (letters transposed) in
+    # "Vehicle Reg Plant Name" — one real 20-July vehicle was missed
+    # without this alias.
+    xswift_plant_blank = _is_blank(xswift_df["Vehicle Reg Plant Name"])
+    xswift_plant_fw = _first_word_series(xswift_df["Vehicle Reg Plant Name"])
+    xswift_plant_matches = (
+        xswift_plant_fw.isin(primary_plant_first_words)
+        | xswift_plant_fw.isin(XSWIFT_PLANT_NAME_TYPO_ALIASES)
+    )
+    xswift_df_for_not_in_at = xswift_df[xswift_plant_blank | xswift_plant_matches]
+    xswift_vehicles_filtered = set(
+        xswift_df_for_not_in_at["Vehicle No"].dropna().astype(str).str.strip().str.upper()
+    )
 
     # Primary-plant filter on AT side only — see docstring for why this
     # is exact-match + a "Raw Material" allowance, not first-word alone.
@@ -1023,10 +1058,14 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     at_vehicle_key = at_df["Vehicle"].astype(str).str.strip().str.upper()
     at_vehicles = set(at_vehicle_key.dropna())
 
-    not_in_at_mask = xswift_df["Vehicle No"].astype(str).str.strip().str.upper().isin(xswift_vehicles - at_vehicles)
-    not_in_at = xswift_df[not_in_at_mask & (xswift_df["Vehicle Status"] != "Online")].copy()
+    not_in_at_mask = xswift_df_for_not_in_at["Vehicle No"].astype(str).str.strip().str.upper().isin(
+        xswift_vehicles_filtered - at_vehicles
+    )
+    not_in_at = xswift_df_for_not_in_at[
+        not_in_at_mask & (xswift_df_for_not_in_at["Vehicle Status"] != "Online")
+    ].copy()
 
-    not_in_swift = at_df[at_vehicle_key.isin(at_vehicles - xswift_vehicles)].copy()
+    not_in_swift = at_df[at_vehicle_key.isin(at_vehicles - xswift_vehicles_all)].copy()
 
     # Genuinely blank spacer columns present in the real output but not
     # in either source dashboard export — see docstring.

@@ -188,8 +188,9 @@ print(f"FINAL: {'PASS' if all(c[1] for c in checks) else 'FAIL'} — {sum(c[1] f
 
 # --- Mapping issue test ---
 # Covers the real bug found: a vehicle with a BLANK Vehicle Reg Plant Name
-# in XSwift must still be treated as primary (XSwift-side plant filter
-# removed entirely — see run_task1_mapping docstring).
+# in XSwift must still be treated as primary (pass-through), while a
+# non-blank NON-matching plant name (e.g. "Secondary") must be excluded —
+# see run_task1_mapping docstring.
 import tempfile
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -197,9 +198,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # XSwift "Trip Dashboard" sheet: 2 banner rows + header + data
     xswift_data = pd.DataFrame({
-        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test"],
-        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle"],
-        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)"],
+        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test", "V_SECONDARY_PLANT_OFFLINE"],
+        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle", "Offline"],
+        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)", "Secondary"],
     })
     xswift_path = tmpdir / "xswift.xlsx"
     with pd.ExcelWriter(xswift_path) as w:
@@ -244,6 +245,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
         ("Not in Swift EXCLUDES auxiliary sub-fleet vehicle (over-matching fix)", "V_AUX_FLEET_SHOULD_NOT_MATCH" not in not_in_swift),
         ("Case-insensitive match excludes v_case_test/V_CASE_TEST from both sheets (real bug fix)",
          "v_case_test" not in not_in_at and "V_CASE_TEST" not in not_in_swift),
+        ("Not in AT EXCLUDES non-matching non-blank plant name vehicle (Secondary-plant over-match fix)",
+         "V_SECONDARY_PLANT_OFFLINE" not in not_in_at),
     ]
     print(f"\n--- Mapping issue checks ---")
     for desc, passed in mapping_checks:
