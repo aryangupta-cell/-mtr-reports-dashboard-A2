@@ -198,9 +198,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # XSwift "Trip Dashboard" sheet: 2 banner rows + header + data
     xswift_data = pd.DataFrame({
-        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test", "V_SECONDARY_PLANT_OFFLINE"],
-        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle", "Offline"],
-        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)", "Secondary"],
+        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test", "V_SECONDARY_PLANT_OFFLINE", "V_BLANK_PLANT_SECONDARY_GROUP"],
+        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle", "Offline", "Offline"],
+        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)", "Secondary", ""],
+        "Group": ["", "", "", "", "", "", "Ultratech Secondary"],
     })
     xswift_path = tmpdir / "xswift.xlsx"
     with pd.ExcelWriter(xswift_path) as w:
@@ -241,7 +242,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
         ("Not in Swift includes AT-only primary-plant vehicle", "V_ONLY_AT" in not_in_swift),
         ("Not in Swift EXCLUDES non-primary-plant AT vehicle", "V_NONPRIMARY_ONLY_AT" not in not_in_swift),
         ("Not in Swift excludes vehicle present on both", "V_BOTH" not in not_in_swift),
-        ("Not in Swift includes AT 'Raw Material' variant vehicle (confirmed exception)", "V_ONLY_AT_NAME_VARIANT" in not_in_swift),
+        ("Not in Swift EXCLUDES AT 'Raw Material' variant vehicle (reversed 2026-07-23: unconditional exclusion now)", "V_ONLY_AT_NAME_VARIANT" not in not_in_swift),
+        ("Not in AT EXCLUDES blank-plant-name vehicle when Group contains 'Secondary' (real bug fix)", "V_BLANK_PLANT_SECONDARY_GROUP" not in not_in_at),
         ("Not in Swift EXCLUDES auxiliary sub-fleet vehicle (over-matching fix)", "V_AUX_FLEET_SHOULD_NOT_MATCH" not in not_in_swift),
         ("Case-insensitive match excludes v_case_test/V_CASE_TEST from both sheets (real bug fix)",
          "v_case_test" not in not_in_at and "V_CASE_TEST" not in not_in_swift),

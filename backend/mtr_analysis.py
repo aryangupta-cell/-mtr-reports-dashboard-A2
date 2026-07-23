@@ -960,11 +960,13 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
       23/70-recall bug) OR its first word matches
       `primary_plant_first_words` (same convention as MTR Analysis's
       Zone Remark / is_primary — see _first_word_series()); exclude rows
-      where the field is present but non-matching (e.g. "Secondary").
-      Confirmed against a real file: this single rule simultaneously
-      fixes 8 Aligarh/Khanpur Khui naming misses, keeps 22 genuine HO/
-      pool-vehicle rows (blank plant name), and excludes 128 Secondary-
-      plant over-matches.
+      where the field is present but non-matching. Confirmed against a
+      real file: this rule fixes 8 Aligarh/Khanpur Khui naming misses,
+      keeps genuine HO/pool-vehicle rows (blank plant name), and excludes
+      Secondary-plant over-matches. FIXED 2026-07-23 (a further real-data
+      refinement): blank plant name should NOT pass through when `Group`
+      contains "Secondary" (e.g. "Ultratech Secondary") — confirmed 27 of
+      49 false-positive rows in a prior check were exactly this pattern.
     - AT's Live Trip Dashboard (`at_live_dashboard_xlsx`) DOES need the
       primary-plant filter — AT's platform spans many non-UTCL client
       companies. FIXED 2026-07-23, confirmed against a real file: plain
@@ -977,14 +979,19 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
       EXACT (case-insensitive) match against the Primary Plants List's
       full company names (e.g. "Sidhi Cement Works", "Dhar Cement
       Works") — confirmed every real "Not in Swift" row's Company Name
-      exactly equals a Primary Plants List entry. The one confirmed
-      exception (needed for a different date's real file) is the
-      "... Raw Material" variant (e.g. "Aligarh Cement Raw Material" /
-      "Rajpura Cement Raw Material") — kept as an explicit second
-      allowance (first word matches AND name contains "RAW MATERIAL"),
-      not blanket first-word matching. This combination: 100% recall,
-      candidates down from 604 to 17 false positives on a real 20-July
-      check.
+      exactly equals a Primary Plants List entry. FIXED 2026-07-23,
+      REVERSED an earlier "Raw Material" allowance (added for a
+      different date's file, where two real rows needed it): confirmed
+      against a real 20-July file that "... Raw Material" company names
+      (e.g. "Aligarh Cement Raw Material", "Aditya Raw Material
+      Vehicle") must be UNCONDITIONALLY EXCLUDED even when they'd
+      otherwise exact-match — checked the full AT dashboard, 31 "Raw
+      Material" vehicles across multiple plants (21 at Kotputli alone),
+      zero appear in the real 20-July output. NOTE: this directly
+      contradicts the reason the allowance existed in the first place —
+      see this function's docstring history/git log if a future date's
+      file needs "Raw Material" rows again; this may be genuinely
+      date-dependent business behavior, not a fixed rule.
     - "Not in AT" additionally filtered to XSwift `Vehicle Status !=
       "Online"` (i.e. Offline/Idle) — cuts candidates from 391 to 329
       with NO loss of recall (confirmed: all 70 real vehicles have
@@ -1002,11 +1009,9 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
       after "Vehicle No", "Not in Swift" after "Vehicle".
 
     Both outputs are therefore SAFE (no false negatives against the real
-    file) but may still be WIDER than the real file on some dates (a
-    small number of false positives from the "Raw Material" allowance
-    matching plants not relevant that day) — treat as a candidate list
-    for review, not a guaranteed exact match, unless/until further
-    precision rules are confirmed.
+    file) but may still be WIDER than the real file on some dates —
+    treat as a candidate list for review, not a guaranteed exact match,
+    unless/until further precision rules are confirmed.
     """
     if not cfg.xswift_live_dashboard_xlsx or not cfg.at_live_dashboard_xlsx:
         log.warning("Task 1 inputs not provided — skipping run_task1_mapping().")
@@ -1035,7 +1040,14 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     # rows spell "Khanpur" as "Kahanpur" (letters transposed) in
     # "Vehicle Reg Plant Name" — one real 20-July vehicle was missed
     # without this alias.
-    xswift_plant_blank = _is_blank(xswift_df["Vehicle Reg Plant Name"])
+    # FIXED 2026-07-23, confirmed against a real file: blank Vehicle Reg
+    # Plant Name should NOT pass through when Group contains "Secondary"
+    # (e.g. "Ultratech Secondary") — 27 of 49 false-positive rows in a
+    # prior check were exactly this pattern (blank plant name, Group =
+    # "Ultratech Secondary"; confirmed excluded vehicles include
+    # MP14GC1145, MP41GA2731, MP09GF4101, MP43AA5764).
+    xswift_group_is_secondary = xswift_df["Group"].astype(str).str.contains("SECONDARY", case=False, na=False)
+    xswift_plant_blank = _is_blank(xswift_df["Vehicle Reg Plant Name"]) & ~xswift_group_is_secondary
     xswift_plant_fw = _first_word_series(xswift_df["Vehicle Reg Plant Name"])
     xswift_plant_matches = (
         xswift_plant_fw.isin(primary_plant_first_words)
@@ -1047,14 +1059,18 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     )
 
     # Primary-plant filter on AT side only — see docstring for why this
-    # is exact-match + a "Raw Material" allowance, not first-word alone.
+    # is exact-match, not first-word alone. FIXED 2026-07-23, confirmed
+    # against a real file: "Raw Material" company names must be
+    # UNCONDITIONALLY excluded, even if they'd otherwise match a primary
+    # plant by first word — reverses an earlier "allowance" for this
+    # pattern (added for a different date's file). Confirmed against the
+    # full AT dashboard: 31 "Raw Material" vehicles across multiple
+    # plants (21 at Kotputli alone), zero of which appear in the real
+    # 20-July output — a full exclusion, not a partial one.
     at_name_upper = at_df["Company Name"].astype(str).str.strip().str.upper()
     is_exact_primary = at_name_upper.isin(primary_plant_companies)
-    is_raw_material_variant = (
-        _first_word_series(at_df["Company Name"]).isin(primary_plant_first_words)
-        & at_name_upper.str.contains("RAW MATERIAL")
-    )
-    at_df = at_df[is_exact_primary | is_raw_material_variant]
+    is_raw_material = at_name_upper.str.contains("RAW MATERIAL")
+    at_df = at_df[is_exact_primary & ~is_raw_material]
     at_vehicle_key = at_df["Vehicle"].astype(str).str.strip().str.upper()
     at_vehicles = set(at_vehicle_key.dropna())
 
