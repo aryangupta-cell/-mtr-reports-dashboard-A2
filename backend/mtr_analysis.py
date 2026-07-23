@@ -939,6 +939,46 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
 # not elsewhere, since it's specific to this field/source.
 XSWIFT_PLANT_NAME_TYPO_ALIASES = {"KAHANPUR"}
 
+# FIXED 2026-07-23, confirmed from the real file's xl/styles.xml: every
+# cell (header and data) is center-aligned, with no fill/border/bold
+# anywhere. Column widths below are from the real file's <cols> — one
+# column ("Driver KPI") has no explicit width in the real file (left at
+# Excel's default) and is deliberately omitted here.
+TRIP_REPUSH_COLUMN_WIDTHS = {
+    "Company": 26.66, "State": 18.11, "Trip ID": 16.11, "Accountability": 12.56,
+    "Old Onward Status": 34.89, "Old Lead Deviation(KM)": 20.33, "Monitor Status": 30.22,
+    "Onward Trip Status": 31.33, "Return Trip Status": 49.22, "SAP PGI No": 11.0,
+    "": 5.22, "SAP Order No": 12.0, "Plant Code": 9.78, "Product Name": 12.66,
+    "Source Location": 24.78, "PGI Creation Date/Time": 20.56, "DI No": 11.0,
+    "Transporter Name": 35.66, "Vehicle": 12.11, "Customer Segment": 16.44,
+    "Customer Name": 36.78, "Quantity": 8.0, "Depot": 14.89, "Destination": 22.44,
+    "City Code": 8.78, "Nearest Geofence": 35.89, "Actual Unloading Location": 89.78,
+    "SAP Lead Distance (Kms)": 20.89, "Current SAP Lead Distance": 22.66,
+    "Onward Distance (Kms)": 20.0, "Return Distance (kms)": 18.89,
+    "Round Trip Distance": 17.44, "Lead Deviation": 26.56, "Customer ID": 12.11,
+    "Tolls Count": 10.11, "Stoppage Count": 14.0, "Overspeed Count": 15.11,
+    "Continous Drive Count": 19.44, "Driver KPI Breakup": 16.11, "Yard Entry": 15.66,
+    "Yard Exit": 15.66, "Parking Duration": 14.56, "Plant Entry": 15.66,
+    "Plant Exit": 15.66, "Loading Duration": 15.0, "Post Yard Entry": 15.66,
+    "Post Yard Exit": 15.66, "Post Yard Duration": 16.33, "Mother Site Entry": 15.66,
+    "Customer Reach Time": 19.0, "Customer Exit Time": 16.89, "Trip End Time": 15.66,
+    "Onwards Travel Duration": 21.56, "Return Travel Duration": 19.66,
+    "Total Travel Duration": 18.44, "UnLoading Duration": 17.44, "Round Trip Speed": 15.22,
+    "Onward Idle Time": 15.44, "Return Idle Time": 14.44, "Trip Idle Time": 12.0,
+    "Cof ID": 17.89, "COF Promised Date/Time": 21.78, "Customer Requested Window": 25.56,
+    "Zone": 7.33, "Compliance Status": 16.11, "Bill Monitor Status": 16.11,
+    "Trip Imei": 16.11,
+}
+
+
+def _apply_trip_repush_formatting(worksheet, workbook, columns) -> None:
+    """Center alignment + real column widths — see
+    TRIP_REPUSH_COLUMN_WIDTHS docstring."""
+    center_format = workbook.add_format({"align": "center"})
+    for col_idx, col_name in enumerate(columns):
+        width = TRIP_REPUSH_COLUMN_WIDTHS.get(col_name)
+        worksheet.set_column(col_idx, col_idx, width, center_format)
+
 
 def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
                        primary_plant_companies: set[str]) -> dict[str, pd.DataFrame]:
@@ -1110,6 +1150,55 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
     return {"Not in AT": not_in_at, "Not in Swift": not_in_swift}
 
 
+# FIXED 2026-07-23, confirmed from the real file's xl/styles.xml (checked
+# every header cell's style index per sheet, not assumed): "Not in AT"'s
+# header is light green (#98FB98) with no border; "Not in Swift"'s
+# header is blue (#29ACF9) with a thin black border. Neither sheet has
+# any alignment override anywhere. "Not in AT"'s data rows are uniformly
+# plain (no fill). "Not in Swift"'s data rows have PER-CELL conditional
+# coloring (yellow/cyan fills, green/red text, red fill on specific
+# cells) that has NOT been reverse-engineered — the exact column/value
+# rule driving it isn't yet confirmed, so it is deliberately NOT
+# implemented here rather than guessed. Flag to the business contact if
+# an exact visual match on "Not in Swift" data cells matters.
+MAPPING_NOT_IN_AT_HEADER_FILL = "#98FB98"
+MAPPING_NOT_IN_SWIFT_HEADER_FILL = "#29ACF9"
+
+MAPPING_NOT_IN_AT_COLUMN_WIDTHS = {
+    "Vehicle No": 12.11, "": 5.22, "Vehicle Status": 12.33, "Last Seen Time": 14.33,
+    "Region": 19.55, "Vehicle Reg Plant Name": 37.0, "dms Provider Name": 17.0,
+    "Group": 46.33, "Forwarder": 34.78, "PGI Time": 14.55, "PGI Number": 21.78,
+    "Origin": 20.78, "Customer Name": 20.0, "Destination": 22.0, "Status": 17.22,
+    "Location": 80.33, "Idle Time": 8.44, "Near By Since": 12.11, "ETA": 14.55,
+    "ETA Status": 9.56,
+}
+MAPPING_NOT_IN_SWIFT_COLUMN_WIDTHS = {
+    "Company Name": 21.0, "Share": 9.11, "Vehicle": 12.89, "": 5.22, "Status": 11.33,
+    "Last Seen": 17.78, "Ignition": 7.11, "Battery": 9.78, "Nearest Site": 30.11,
+    "Nearest Location": 69.56, "Speed (Km/h)": 11.78, "Idle Time(hh:mm:ss)": 17.56,
+    "Sim Num": 12.0, "Driver Name": 11.22, "Mobile": 6.66, "Remarks": 8.0,
+    "Veh Spec": 8.33, "Imei": 12.0, "Camera": 7.33, "Ops Remark": 10.78,
+}
+
+
+def _apply_mapping_issue_formatting(worksheet, workbook, sheet_name: str, columns) -> None:
+    """Header fill (+ border for "Not in Swift") and real column widths
+    — see MAPPING_NOT_IN_AT_HEADER_FILL/MAPPING_NOT_IN_SWIFT_HEADER_FILL
+    docstring. Deliberately does NOT touch "Not in Swift"'s per-cell
+    data coloring — not yet reverse-engineered."""
+    if sheet_name == "Not in AT":
+        header_format = workbook.add_format({"bg_color": MAPPING_NOT_IN_AT_HEADER_FILL})
+        widths = MAPPING_NOT_IN_AT_COLUMN_WIDTHS
+    elif sheet_name == "Not in Swift":
+        header_format = workbook.add_format({"bg_color": MAPPING_NOT_IN_SWIFT_HEADER_FILL, "border": 1})
+        widths = MAPPING_NOT_IN_SWIFT_COLUMN_WIDTHS
+    else:
+        return
+    for col_idx, col_name in enumerate(columns):
+        worksheet.set_column(col_idx, col_idx, widths.get(col_name))
+        worksheet.write(0, col_idx, col_name, header_format)
+
+
 # =============================================================================
 # Output writers
 # =============================================================================
@@ -1154,6 +1243,37 @@ DURATION_FORMAT_COLUMNS = {
     "Destination Ageing", "Onward Duration",
 }
 
+# Column widths (Excel width units) confirmed directly from the real
+# file's xl/worksheets/sheet*.xml <cols> element, mapped by column NAME
+# (not letter position — this pipeline's confirmed layout inserts 3
+# extra Mother Geofence columns the real file's one-off 20-July export
+# didn't have, so letter positions don't line up 1:1). Every cell in the
+# real file — header AND data, every column — is center-aligned; there
+# is no left-aligned column anywhere in this sheet (checked across a
+# 300-row sample of styles.xml/sheet3.xml, not assumed). Columns this
+# pipeline adds beyond the real file's confirmed 53 (Mother Geofence
+# x3, XSwift Plant Name Match) have no real reference to match, so are
+# left at Excel's default width.
+MTR_ANALYSIS_COLUMN_WIDTHS = {
+    "Trip ID": 9.0, "Vehicle No.": 12.78, "Vehicle Type": 11.22, "SAP PGI No": 11.0,
+    "PGI Date & Time": 14.66, NEW_DATE_AND_TIME: 14.66, "SAP Order No": 12.0, "DI No": 11.0,
+    "Transporter Name ": 39.78, NEW_TRANSPORTER_REMARK: 39.78, "Transporter Code": 15.33,
+    "Zone": 7.33, "Yard IN": 14.66, "Yard Out": 14.66, "Yard detention": 13.11,
+    NEW_YARD_DETENTION_SLAB: 18.22, "Plant name": 26.66, NEW_ZONE_REMARK: 26.66,
+    "Plant Code": 10.66, "Plant Entry": 14.66, "Plant Exit": 14.66, "Plant Detention": 13.78,
+    NEW_PLANT_DETENTION_SLAB: 17.44, "Destination Code": 15.11, "Destination": 28.89,
+    NEW_AT_DEST_NAME: 28.89, NEW_DEST_MATCH: 28.89, "Customer Name": 40.89,
+    "Dest Entry Time": 14.66, "Dest Exit Time": 14.66, "Dest Detention": 13.33,
+    NEW_DEST_DETENTION_SLAB: 22.66, "Destination Proximity End Time": 26.78,
+    "Destination Ageing": 16.22, "Onward Duration": 15.11, "Customer Segment": 16.44,
+    "Compliance Status": 16.11, "Depot": 19.11, "Route Name": 48.56, "Halt": 4.33,
+    "Onward Status": 12.89, "Stamp Status": 14.22, "Reject Reason": 12.56,
+    "Sap Lead Dist": 11.78, NEW_AT_SAP_LEAD_DIST: 18.0, NEW_MATCH: 18.0,
+    "GPS Distance": 11.56, "AI Repaired Distance": 18.0, NEW_AI_CHECK: 18.0,
+    NEW_SAP_AI: 18.0, NEW_SAP_AI_REMARK: 18.0, "Geofence Hit/miss": 16.11,
+    "Billing Status": 11.22,
+}
+
 
 def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
                 pivots_by_sheet: dict[str, list[tuple[str, pd.DataFrame]]],
@@ -1185,10 +1305,15 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
     not a guess): the 12 columns in YELLOW_HEADER_COLUMNS get a yellow
     (#FFFF00) header background, matching the business contact's own
     notes ("all the columns highlighted with yellow header added"). Date
-    columns get proper Excel datetime formatting; Plant Detention gets
-    Excel's time-duration format. Every other column is left as Excel's
-    general default — do not add formatting beyond what's listed here
-    without re-confirming against the real file first.
+    columns get proper Excel datetime formatting; duration columns get
+    Excel's time format. FIXED 2026-07-23, confirmed against the real
+    file's sheet3.xml cellXfs (checked every column, header and data,
+    across a 300-row sample): every cell in the real file is
+    center-aligned, and every column has an explicit width matching
+    MTR_ANALYSIS_COLUMN_WIDTHS — neither was true before (cells used
+    Excel's default alignment, columns used auto-width). No column is
+    left-aligned; do not add per-column left-alignment without
+    re-confirming against the real file first.
     """
     log.info("Writing XLSX to %s", path)
     with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
@@ -1215,9 +1340,23 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
         for col in DATETIME_FORMAT_COLUMNS:
             if col in main_df.columns:
                 parsed = pd.to_datetime(main_df[col], format="%d %b %y %H:%M", errors="coerce")
+                # FIXED 2026-07-23: writing pandas Timestamp objects
+                # directly makes pandas' own to_excel() apply ITS OWN
+                # per-cell datetime style (a hardcoded "YYYY-MM-DD
+                # HH:MM:SS" format with no alignment) BEFORE this
+                # function's set_column() call runs — an explicit
+                # per-cell style always wins over a later column-level
+                # one, so the intended center alignment never took
+                # effect. Converting to a raw Excel serial-date float
+                # (same convention already used for DURATION_FORMAT_COLUMNS
+                # below) avoids pandas ever recognizing the column as
+                # datetime-typed, so only this function's own format
+                # (num_format + center alignment) ever gets applied.
+                excel_epoch = pd.Timestamp("1899-12-30")
+                serial = (parsed - excel_epoch).dt.total_seconds() / 86400
                 # Real file's blank cells are the literal text " ", not an
                 # empty cell — keep that convention instead of NaT.
-                main_df[col] = parsed.astype(object).where(parsed.notna(), " ")
+                main_df[col] = serial.astype(object).where(parsed.notna(), " ")
         for col in DURATION_FORMAT_COLUMNS:
             if col in main_df.columns:
                 minutes = _minutes_from_excel_duration(main_df[col])
@@ -1229,9 +1368,13 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
         main_df.to_excel(writer, sheet_name=main_sheet_name, index=False)
         worksheet = writer.sheets[main_sheet_name]
 
-        yellow_header_format = workbook.add_format({"bg_color": "#FFFF00", "bold": False})
-        datetime_format = workbook.add_format({"num_format": "m/d/yy h:mm"})
-        duration_format = workbook.add_format({"num_format": "h:mm"})
+        # "align": "center" on every format below — see docstring, every
+        # cell in the real file (header and data, every column) is
+        # center-aligned.
+        yellow_header_format = workbook.add_format({"bg_color": "#FFFF00", "bold": False, "align": "center"})
+        center_format = workbook.add_format({"align": "center"})
+        datetime_format = workbook.add_format({"num_format": "m/d/yy h:mm", "align": "center"})
+        duration_format = workbook.add_format({"num_format": "h:mm", "align": "center"})
         # FIXED 2026-07-22, confirmed cell-by-cell against a real file:
         # duration cells use "h:mm" when under 24h but "[h]:mm:ss" (elapsed
         # time, with seconds) once the value reaches 1 day or more — a
@@ -1240,15 +1383,16 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
         # number format (only how Excel highlights it — openpyxl still
         # reads the base "h:mm"), so the >=1-day cells are individually
         # re-written with the overflow format after the bulk write.
-        duration_overflow_format = workbook.add_format({"num_format": "[h]:mm:ss"})
+        duration_overflow_format = workbook.add_format({"num_format": "[h]:mm:ss", "align": "center"})
 
         for col_idx, col_name in enumerate(main_df.columns):
+            width = MTR_ANALYSIS_COLUMN_WIDTHS.get(col_name)
             if col_name in YELLOW_HEADER_COLUMNS:
                 worksheet.write(0, col_idx, col_name, yellow_header_format)
             if col_name in DATETIME_FORMAT_COLUMNS:
-                worksheet.set_column(col_idx, col_idx, None, datetime_format)
+                worksheet.set_column(col_idx, col_idx, width, datetime_format)
             elif col_name in DURATION_FORMAT_COLUMNS:
-                worksheet.set_column(col_idx, col_idx, None, duration_format)
+                worksheet.set_column(col_idx, col_idx, width, duration_format)
                 mask = overflow_masks.get(col_name)
                 if mask is not None and mask.any():
                     for row_idx in np.flatnonzero(mask.to_numpy()):
@@ -1256,6 +1400,8 @@ def write_xlsx(main_sheet_name: str, main_df: pd.DataFrame,
                             row_idx + 1, col_idx, main_df[col_name].iat[row_idx],
                             duration_overflow_format,
                         )
+            else:
+                worksheet.set_column(col_idx, col_idx, width, center_format)
 
     # path may be a real file path (CLI/disk mode) or an in-memory buffer
     # (see run_in_memory() below) — size it either way without touching
@@ -1318,6 +1464,7 @@ def run(cfg: Config) -> None:
     trip_repush = run_task1_trip_repush(consignment_full, mtr, primary_plant_first_words)
     with pd.ExcelWriter(cfg.output_dir / f"Trip_Repush_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=cfg.run_date_label[:31], index=False)
+        _apply_trip_repush_formatting(writer.sheets[cfg.run_date_label[:31]], writer.book, trip_repush.columns)
 
     # --- Output 3: "Output Mapping issue" ---
     # ONE workbook, TWO tabs ("Not in AT", "Not in Swift") — matches the
@@ -1332,6 +1479,7 @@ def run(cfg: Config) -> None:
             with pd.ExcelWriter(cfg.output_dir / f"Mapping_issue_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
                 for name, df in task1_results.items():
                     df.to_excel(writer, sheet_name=name[:31], index=False)
+                    _apply_mapping_issue_formatting(writer.sheets[name[:31]], writer.book, name, df.columns)
     else:
         log.info("Mapping issue inputs not provided — skipping (pass --xswift-live-dashboard-xlsx and --at-live-dashboard-xlsx to run it).")
 
@@ -1399,6 +1547,7 @@ def run_in_memory(
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
+        _apply_trip_repush_formatting(writer.sheets[run_date_label[:31]], writer.book, trip_repush.columns)
     outputs[f"Trip_Repush_-_{run_date_label}.xlsx"] = buf.getvalue()
 
     # --- Output 3: "Output Mapping issue" ---
@@ -1412,6 +1561,7 @@ def run_in_memory(
             with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
                 for name, df in task1_results.items():
                     df.to_excel(writer, sheet_name=name[:31], index=False)
+                    _apply_mapping_issue_formatting(writer.sheets[name[:31]], writer.book, name, df.columns)
             outputs[f"Mapping_issue_-_{run_date_label}.xlsx"] = buf.getvalue()
     else:
         log.info("Mapping issue inputs not provided — skipping.")
@@ -1478,6 +1628,7 @@ def run_trip_repush_report(
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         trip_repush.to_excel(writer, sheet_name=run_date_label[:31], index=False)
+        _apply_trip_repush_formatting(writer.sheets[run_date_label[:31]], writer.book, trip_repush.columns)
     return buf.getvalue()
 
 
@@ -1506,12 +1657,41 @@ def run_mapping_issue_report(
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         for name, df in task1_results.items():
             df.to_excel(writer, sheet_name=name[:31], index=False)
+            _apply_mapping_issue_formatting(writer.sheets[name[:31]], writer.book, name, df.columns)
     return buf.getvalue()
 
 
 # Raw AT dashboard Status values -> what this report needs them mapped to.
 # Confirmed 2026-07-22 directly from a real AT live dashboard export.
 AT_STATUS_TO_VEHICLE_STATUS = {"Unreachable": "Offline", "Moving": "Online", "Idle": "Idle"}
+
+# FIXED 2026-07-23, confirmed directly from the real file's
+# xl/worksheets/sheet1.xml + xl/styles.xml (checked every header cell's
+# style index, not assumed): the header row is NOT uniformly yellow —
+# "Vehicle Status" and "Match" are yellow with no border, "AT vehicle
+# status" is a distinct light grey (no border), and every other column
+# is yellow WITH a thin black border. No cell anywhere in this file
+# (header or data) has an alignment override — it is NOT center-aligned,
+# contrary to that being assumed; left as Excel's default.
+VEHICLE_STATUS_YELLOW_BORDERED_COLUMNS = {
+    "Vehicle No", "Last Seen Time", "Region", "Vehicle Reg Plant Name",
+    "dms Provider Name", "Group", "Forwarder", "PGI Time", "PGI Number",
+    "Origin", "Customer Name", "Destination", "Status", "Location",
+    "Idle Time", "Near By Since", "ETA", "ETA Status",
+}
+VEHICLE_STATUS_YELLOW_PLAIN_COLUMNS = {"Vehicle Status", "Match"}
+VEHICLE_STATUS_GREY_COLUMN = "AT vehicle status"
+
+# Column widths (Excel width units) confirmed from the real file's <cols>.
+VEHICLE_STATUS_COLUMN_WIDTHS = {
+    "Vehicle No": 12.78, "Vehicle Status": 12.33, "AT vehicle status": 14.33,
+    "Match": 6.22, "Last Seen Time": 14.55, "Region": 23.22,
+    "Vehicle Reg Plant Name": 37.0, "dms Provider Name": 17.0, "Group": 59.22,
+    "Forwarder": 39.78, "PGI Time": 14.55, "PGI Number": 53.89, "Origin": 23.33,
+    "Customer Name": 91.66, "Destination": 35.66, "Status": 30.22,
+    "Location": 126.33, "Idle Time": 8.56, "Near By Since": 12.11,
+    "ETA": 14.55, "ETA Status": 9.56,
+}
 
 
 def run_vehicle_status_report(xswift_live_dashboard_xlsx: bytes, at_live_dashboard_xlsx: bytes) -> bytes:
@@ -1588,6 +1768,20 @@ def run_vehicle_status_report(xswift_live_dashboard_xlsx: bytes, at_live_dashboa
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df.to_excel(writer, sheet_name="Sheet1", index=False)
+        worksheet = writer.sheets["Sheet1"]
+        workbook = writer.book
+        yellow_bordered = workbook.add_format({"bg_color": "#FFFF00", "border": 1})
+        yellow_plain = workbook.add_format({"bg_color": "#FFFF00"})
+        grey_plain = workbook.add_format({"bg_color": "#DBDBDB"})
+        for col_idx, col_name in enumerate(df.columns):
+            width = VEHICLE_STATUS_COLUMN_WIDTHS.get(col_name)
+            worksheet.set_column(col_idx, col_idx, width)
+            if col_name in VEHICLE_STATUS_YELLOW_BORDERED_COLUMNS:
+                worksheet.write(0, col_idx, col_name, yellow_bordered)
+            elif col_name in VEHICLE_STATUS_YELLOW_PLAIN_COLUMNS:
+                worksheet.write(0, col_idx, col_name, yellow_plain)
+            elif col_name == VEHICLE_STATUS_GREY_COLUMN:
+                worksheet.write(0, col_idx, col_name, grey_plain)
     return buf.getvalue()
 
 
