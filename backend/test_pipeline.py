@@ -160,15 +160,23 @@ for sheet, pivots in pivots_by_sheet.items():
 # appear), one non-primary-plant + missing from MTR (should NOT appear).
 consignment = pd.DataFrame({
     "Company": ["Aditya Cement Works", "Aditya Cement Works", "Some Secondary Plant"],
-    "SAP PGI No": ["P_MISSING_1", "P1", "P_MISSING_2"],  # P1 exists in mtr (row0 of synthetic mtr above)
+    # numeric-looking strings so the CONS_NUMERIC_COLUMNS conversion (see
+    # run_task1_trip_repush) has something real to test; "P1" stays
+    # non-numeric since that row is filtered out (present in MTR) before
+    # the numeric conversion runs, so its own value never matters.
+    "SAP PGI No": ["9001", "P1", "9002"],  # P1 exists in mtr (row0 of synthetic mtr above)
+    "SAP Order No": ["SO1", "SO2", "SO3"],
     "Plant Code": ["6910", "6910", "9999"],  # 6910 is primary (Aditya), 9999 is not
 })
 repush = run_task1_trip_repush(consignment, mtr, primary_plant_first_words)
 repush_checks = [
-    ("Trip Repush includes primary+missing (P_MISSING_1)", "P_MISSING_1" in set(repush["SAP PGI No"])),
+    ("Trip Repush includes primary+missing (9001)", 9001 in set(repush["SAP PGI No"])),
     ("Trip Repush excludes primary+present-in-MTR (P1)", "P1" not in set(repush["SAP PGI No"])),
-    ("Trip Repush excludes non-primary+missing (P_MISSING_2)", "P_MISSING_2" not in set(repush["SAP PGI No"])),
+    ("Trip Repush excludes non-primary+missing (9002)", 9002 not in set(repush["SAP PGI No"])),
     ("Trip Repush row count == 1", len(repush) == 1),
+    ("Trip Repush SAP PGI No is a real number, not text (real bug fix)", pd.api.types.is_numeric_dtype(repush["SAP PGI No"])),
+    ("Trip Repush has blank spacer column after SAP PGI No (real bug fix)",
+     list(repush.columns).index("") == list(repush.columns).index("SAP PGI No") + 1),
 ]
 print(f"\n--- Trip Repush checks ---")
 for desc, passed in repush_checks:
@@ -189,9 +197,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # XSwift "Trip Dashboard" sheet: 2 banner rows + header + data
     xswift_data = pd.DataFrame({
-        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE"],
-        "Vehicle Status": ["Offline", "Online", "Idle", "Offline"],
-        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", ""],
+        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test"],
+        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle"],
+        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)"],
     })
     xswift_path = tmpdir / "xswift.xlsx"
     with pd.ExcelWriter(xswift_path) as w:
@@ -202,10 +210,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # AT "dashboard" sheet
     at_data = pd.DataFrame({
-        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co", "Aditya Raw Material"],
-        "Share": ["Veh Share", "Veh Share", "Veh Share", "Veh Share"],
-        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT", "V_ONLY_AT_NAME_VARIANT"],
-        "Status": ["Idle", "Idle", "Idle", "Idle"],
+        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co", "Aditya Raw Material", "Aditya Mines", "Aditya Cement Works"],
+        "Share": ["Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share"],
+        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT", "V_ONLY_AT_NAME_VARIANT", "V_AUX_FLEET_SHOULD_NOT_MATCH", "V_CASE_TEST"],
+        "Status": ["Idle", "Idle", "Idle", "Idle", "Idle", "Idle"],
     })
     at_path = tmpdir / "at.xlsx"
     at_data.to_excel(at_path, sheet_name="dashboard", index=False)
@@ -214,7 +222,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
         mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
         xswift_live_dashboard_xlsx=xswift_path, at_live_dashboard_xlsx=at_path,
     )
-    mapping_result = run_task1_mapping(cfg_mapping, primary_plant_first_words={"ADITYA"})
+    mapping_result = run_task1_mapping(
+        cfg_mapping,
+        primary_plant_first_words={"ADITYA"},
+        primary_plant_companies={"ADITYA CEMENT WORKS"},
+    )
 
     not_in_at = set(mapping_result["Not in AT"]["Vehicle No"])
     not_in_swift = set(mapping_result["Not in Swift"]["Vehicle"])
@@ -224,10 +236,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
         ("Not in AT EXCLUDES online-only-in-xswift vehicle (status filter)", "V_ONLY_XSWIFT_ONLINE" not in not_in_at),
         ("Not in AT excludes vehicle present on both", "V_BOTH" not in not_in_at),
         ("Not in AT includes BLANK-plant-name vehicle (the real bug fix)", "V_BLANK_PLANT_OFFLINE" in not_in_at),
+        ("Not in AT has blank spacer column after Vehicle No", list(mapping_result["Not in AT"].columns).index("") == list(mapping_result["Not in AT"].columns).index("Vehicle No") + 1),
         ("Not in Swift includes AT-only primary-plant vehicle", "V_ONLY_AT" in not_in_swift),
         ("Not in Swift EXCLUDES non-primary-plant AT vehicle", "V_NONPRIMARY_ONLY_AT" not in not_in_swift),
         ("Not in Swift excludes vehicle present on both", "V_BOTH" not in not_in_swift),
-        ("Not in Swift includes AT company-name-variant vehicle (first-word match fix)", "V_ONLY_AT_NAME_VARIANT" in not_in_swift),
+        ("Not in Swift includes AT 'Raw Material' variant vehicle (confirmed exception)", "V_ONLY_AT_NAME_VARIANT" in not_in_swift),
+        ("Not in Swift EXCLUDES auxiliary sub-fleet vehicle (over-matching fix)", "V_AUX_FLEET_SHOULD_NOT_MATCH" not in not_in_swift),
+        ("Case-insensitive match excludes v_case_test/V_CASE_TEST from both sheets (real bug fix)",
+         "v_case_test" not in not_in_at and "V_CASE_TEST" not in not_in_swift),
     ]
     print(f"\n--- Mapping issue checks ---")
     for desc, passed in mapping_checks:

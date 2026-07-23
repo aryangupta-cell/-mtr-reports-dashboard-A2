@@ -168,6 +168,21 @@ CONS_PLANT_CODE = "Plant Code"
 CONS_VEHICLE = "Vehicle"
 CONS_COMPANY = "Company"
 
+# Consignment Report / Trip Repush columns confirmed (2026-07-23, cell
+# type check across every row of a real Trip Repush file) to be real
+# Excel numbers, not text — everything else (including the
+# superficially-numeric "Continous Drive Count", confirmed to stay text
+# in the real file) is left as-is.
+CONS_NUMERIC_COLUMNS = [
+    "Old Lead Deviation(KM)", "SAP PGI No", "Quantity", "SAP Lead Distance (Kms)",
+    "Current SAP Lead Distance", "Onward Distance (Kms)", "Return Distance (kms)",
+    "Round Trip Distance", "Tolls Count", "Stoppage Count", "Overspeed Count",
+    "Parking Duration", "Loading Duration", "Post Yard Duration",
+    "Onwards Travel Duration", "Return Travel Duration", "Total Travel Duration",
+    "UnLoading Duration", "Round Trip Speed", "Onward Idle Time",
+    "Return Idle Time", "Trip Idle Time",
+]
+
 # --- Primary Plants List columns ---
 PLANTS_COMPANY_COL = "Company"
 PLANTS_CODE_COL = "Plant Code"
@@ -890,6 +905,15 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
     Primary Plants List's "AT Plant Name" tab), not Plant-Code-based —
     that tab has no codes at all anymore. Same first-word matching as
     build_analysis_columns()'s is_primary — see _first_word_series().
+
+    FIXED 2026-07-23, confirmed against a real file:
+    - a genuinely blank, unnamed column sits between "SAP PGI No" and
+      "SAP Order No" in the real output (0 non-null values across every
+      row checked) — the source Consignment Report doesn't have it, the
+      real file just inserts an empty spacer column there.
+    - several columns (see CONS_NUMERIC_COLUMNS) are real Excel numbers
+      in the real output, not text — converted here so they write as
+      actual numbers, not strings, in the final xlsx.
     """
     log.info("Running Task 1: Trip Repush")
     is_primary = _first_word_series(consignment[CONS_COMPANY]).isin(primary_plant_first_words)
@@ -897,11 +921,20 @@ def run_task1_trip_repush(consignment: pd.DataFrame, mtr: pd.DataFrame,
     missing_from_xswift = ~consignment[CONS_SAP_PGI_NO].astype(str).str.strip().isin(mtr_pgi_set)
 
     result = consignment[is_primary & missing_from_xswift].copy()
+
+    for col in CONS_NUMERIC_COLUMNS:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors="coerce")
+
+    sap_order_pos = result.columns.get_loc("SAP Order No")
+    result.insert(sap_order_pos, "", pd.NA)
+
     log.info("Trip Repush: %d rows (primary plant + not in XSwift MTR)", len(result))
     return result
 
 
-def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str]) -> dict[str, pd.DataFrame]:
+def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
+                       primary_plant_companies: set[str]) -> dict[str, pd.DataFrame]:
     """CONFIRMED — UN-HELD 2026-07-20. Reproduces the candidate list behind
     Mapping_issue_-_20_July.xlsx: vehicles present on one live dashboard
     (AT or XSwift) but not the other.
@@ -920,29 +953,46 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str]) -> dict[
       that field was silently dropping 23/70 real answers).
     - AT's Live Trip Dashboard (`at_live_dashboard_xlsx`) DOES need the
       primary-plant filter — AT's platform spans many non-UTCL client
-      companies. Match by first word of `Company Name` against
-      `primary_plant_first_words` (same convention as
-      build_analysis_columns()/run_task1_trip_repush() — see
-      _first_word_series()), NOT exact full-name matching. Fixed
-      2026-07-22: exact-match-after-suffix-stripping was missing AT
-      company-name variants like "Aligarh Cement Raw Material" /
-      "Rajpura Cement Raw Material" that don't equal the Primary Plants
-      List's "...Cement Works" entries but are the same primary plant.
+      companies. FIXED 2026-07-23, confirmed against a real file: plain
+      first-word matching is too loose here — AT's "Company Name" field
+      has many auxiliary sub-fleets sharing a plant's first word (e.g.
+      "Sidhi Mines", "Vikram Cement Material Inward", "Baga Cement
+      Work-Two way Communication", "...Pool Vehicles", "...Admin") that
+      are NOT the real primary fleet and inflated "Not in Swift" to 604
+      false-positive candidates. The real matched rows are almost all an
+      EXACT (case-insensitive) match against the Primary Plants List's
+      full company names (e.g. "Sidhi Cement Works", "Dhar Cement
+      Works") — confirmed every real "Not in Swift" row's Company Name
+      exactly equals a Primary Plants List entry. The one confirmed
+      exception (needed for a different date's real file) is the
+      "... Raw Material" variant (e.g. "Aligarh Cement Raw Material" /
+      "Rajpura Cement Raw Material") — kept as an explicit second
+      allowance (first word matches AND name contains "RAW MATERIAL"),
+      not blanket first-word matching. This combination: 100% recall,
+      candidates down from 604 to 17 false positives on a real 20-July
+      check.
     - "Not in AT" additionally filtered to XSwift `Vehicle Status !=
       "Online"` (i.e. Offline/Idle) — cuts candidates from 391 to 329
       with NO loss of recall (confirmed: all 70 real vehicles have
       Vehicle Status in {Offline, Idle}).
-    - "Not in Swift" has NO further confirmed precision filter — the AT
-      `Status` field (Idle/Unreachable/Moving) does not cleanly separate
-      the 10 real answers from the other candidates (restricting to
-      "Idle" only drops 2 of the 10 real vehicles). Left as the full
-      180-candidate list; narrowing further needs input from the
-      business contact rather than a guessed threshold.
+    - "Not in Swift" has NO further confirmed precision filter beyond
+      the company-name tightening above.
+    - Vehicle matching (both sheets) is case-insensitive — FIXED
+      2026-07-23: AT's `Vehicle` field has inconsistent casing (e.g.
+      "Jh01ET9156" instead of "JH01ET9156"), unlike a real VLOOKUP/
+      set-membership comparison a human would do in Excel, which is
+      case-insensitive by default.
+    - Both output sheets have a genuinely blank, unnamed spacer column
+      inserted by the real manual process (confirmed: 0 non-null values)
+      that isn't present in either source dashboard export — "Not in AT"
+      after "Vehicle No", "Not in Swift" after "Vehicle".
 
     Both outputs are therefore SAFE (no false negatives against the real
-    file) but WIDER than the real file (some false positives) — treat as
-    a candidate list for review, not a guaranteed exact match, unless/
-    until further precision rules are confirmed.
+    file) but may still be WIDER than the real file on some dates (a
+    small number of false positives from the "Raw Material" allowance
+    matching plants not relevant that day) — treat as a candidate list
+    for review, not a guaranteed exact match, unless/until further
+    precision rules are confirmed.
     """
     if not cfg.xswift_live_dashboard_xlsx or not cfg.at_live_dashboard_xlsx:
         log.warning("Task 1 inputs not provided — skipping run_task1_mapping().")
@@ -957,22 +1007,31 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str]) -> dict[
     )
     at_df = pd.read_excel(cfg.at_live_dashboard_xlsx, sheet_name="dashboard", dtype=str)
 
-    # NO plant filter on XSwift side — see docstring.
-    xswift_vehicles = set(xswift_df["Vehicle No"].dropna().astype(str).str.strip())
+    # NO plant filter on XSwift side — see docstring. Case-insensitive
+    # vehicle matching throughout — see docstring.
+    xswift_vehicles = set(xswift_df["Vehicle No"].dropna().astype(str).str.strip().str.upper())
 
-    # Primary-plant filter on AT side only — matched by first word, same
-    # convention as build_analysis_columns()/run_task1_trip_repush() (see
-    # _first_word_series() docstring), not exact full-name matching. AT's
-    # "Company Name" field has variants like "Aligarh Cement Raw Material"
-    # that don't equal the Primary Plants List's "Aligarh Cement Works" but
-    # share the same first word and are the same primary plant.
-    at_df = at_df[_first_word_series(at_df["Company Name"]).isin(primary_plant_first_words)]
-    at_vehicles = set(at_df["Vehicle"].dropna().astype(str).str.strip())
+    # Primary-plant filter on AT side only — see docstring for why this
+    # is exact-match + a "Raw Material" allowance, not first-word alone.
+    at_name_upper = at_df["Company Name"].astype(str).str.strip().str.upper()
+    is_exact_primary = at_name_upper.isin(primary_plant_companies)
+    is_raw_material_variant = (
+        _first_word_series(at_df["Company Name"]).isin(primary_plant_first_words)
+        & at_name_upper.str.contains("RAW MATERIAL")
+    )
+    at_df = at_df[is_exact_primary | is_raw_material_variant]
+    at_vehicle_key = at_df["Vehicle"].astype(str).str.strip().str.upper()
+    at_vehicles = set(at_vehicle_key.dropna())
 
-    not_in_at_mask = xswift_df["Vehicle No"].astype(str).str.strip().isin(xswift_vehicles - at_vehicles)
-    not_in_at = xswift_df[not_in_at_mask & (xswift_df["Vehicle Status"] != "Online")]
+    not_in_at_mask = xswift_df["Vehicle No"].astype(str).str.strip().str.upper().isin(xswift_vehicles - at_vehicles)
+    not_in_at = xswift_df[not_in_at_mask & (xswift_df["Vehicle Status"] != "Online")].copy()
 
-    not_in_swift = at_df[at_df["Vehicle"].astype(str).str.strip().isin(at_vehicles - xswift_vehicles)]
+    not_in_swift = at_df[at_vehicle_key.isin(at_vehicles - xswift_vehicles)].copy()
+
+    # Genuinely blank spacer columns present in the real output but not
+    # in either source dashboard export — see docstring.
+    not_in_at.insert(not_in_at.columns.get_loc("Vehicle No") + 1, "", pd.NA)
+    not_in_swift.insert(not_in_swift.columns.get_loc("Vehicle") + 1, "", pd.NA)
 
     log.info("Not in AT: %d candidates (100%% recall vs. real file, precision not fully resolved)", len(not_in_at))
     log.info("Not in Swift: %d candidates (100%% recall vs. real file, precision not fully resolved)", len(not_in_swift))
@@ -1196,7 +1255,8 @@ def run(cfg: Config) -> None:
     # see run_task1_mapping() docstring); this is a deliberate, documented
     # tradeoff, not a bug.
     if cfg.xswift_live_dashboard_xlsx and cfg.at_live_dashboard_xlsx:
-        task1_results = run_task1_mapping(cfg, primary_plant_first_words)
+        primary_plant_companies = load_primary_plant_companies(cfg.primary_plants_xlsx)
+        task1_results = run_task1_mapping(cfg, primary_plant_first_words, primary_plant_companies)
         if task1_results:
             with pd.ExcelWriter(cfg.output_dir / f"Mapping_issue_-_{cfg.run_date_label}.xlsx", engine="xlsxwriter") as writer:
                 for name, df in task1_results.items():
@@ -1274,7 +1334,8 @@ def run_in_memory(
     if xswift_live_dashboard_xlsx and at_live_dashboard_xlsx:
         cfg.xswift_live_dashboard_xlsx = io.BytesIO(xswift_live_dashboard_xlsx)
         cfg.at_live_dashboard_xlsx = io.BytesIO(at_live_dashboard_xlsx)
-        task1_results = run_task1_mapping(cfg, primary_plant_first_words)
+        primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
+        task1_results = run_task1_mapping(cfg, primary_plant_first_words, primary_plant_companies)
         if task1_results:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
@@ -1361,13 +1422,14 @@ def run_mapping_issue_report(
     )
 
     primary_plant_first_words = load_primary_plant_first_words(io.BytesIO(primary_plants_xlsx))
+    primary_plant_companies = load_primary_plant_companies(io.BytesIO(primary_plants_xlsx))
     cfg = Config(
         mtr_csv=Path("."), consignment_xlsx=Path("."), primary_plants_xlsx=Path("."),
         xswift_live_dashboard_xlsx=io.BytesIO(xswift_live_dashboard_xlsx),
         at_live_dashboard_xlsx=io.BytesIO(at_live_dashboard_xlsx),
         run_date_label=run_date_label,
     )
-    task1_results = run_task1_mapping(cfg, primary_plant_first_words)
+    task1_results = run_task1_mapping(cfg, primary_plant_first_words, primary_plant_companies)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
@@ -1418,14 +1480,26 @@ def run_vehicle_status_report(xswift_live_dashboard_xlsx: bytes, at_live_dashboa
     ).fillna("")
     at_df = pd.read_excel(io.BytesIO(at_live_dashboard_xlsx), sheet_name="dashboard", dtype=str)
 
+    # FIXED 2026-07-23, confirmed against real files:
+    # 1. Vehicle No matching must be case-insensitive — AT's Vehicle
+    #    column has inconsistent casing (e.g. "Jh01ET9156" instead of
+    #    "JH01ET9156"), unlike Excel's VLOOKUP which matches
+    #    case-insensitively by default.
+    # 2. When a vehicle appears more than once in the AT dashboard
+    #    (shared across companies), the real file always uses whichever
+    #    row comes FIRST — VLOOKUP's default "first match wins" behavior.
+    #    dict(zip(...)) keeps the LAST value for a repeated key, so the
+    #    AT rows are reversed before building the lookup (same pattern as
+    #    build_consignment_lookups()) to get first-match-wins instead.
     at_df = at_df.copy()
     at_df["_mapped_status"] = at_df["Status"].map(AT_STATUS_TO_VEHICLE_STATUS)
+    at_vehicle_key = at_df["Vehicle"].dropna().astype(str).str.strip().str.upper()
     vehicle_to_at_status = dict(
-        zip(at_df["Vehicle"].dropna().astype(str).str.strip(), at_df["_mapped_status"])
+        zip(at_vehicle_key[::-1], at_df["_mapped_status"][::-1])
     )
 
     df = xswift_df.copy()
-    vehicle_key = df["Vehicle No"].astype(str).str.strip()
+    vehicle_key = df["Vehicle No"].astype(str).str.strip().str.upper()
     at_vehicle_status = vehicle_key.map(vehicle_to_at_status)
     at_status_is_na = at_vehicle_status.isna()
     df["AT vehicle status"] = at_vehicle_status.fillna("#N/A")
