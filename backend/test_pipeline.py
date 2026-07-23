@@ -198,10 +198,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # XSwift "Trip Dashboard" sheet: 2 banner rows + header + data
     xswift_data = pd.DataFrame({
-        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test", "V_SECONDARY_PLANT_OFFLINE", "V_BLANK_PLANT_SECONDARY_GROUP"],
-        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle", "Offline", "Offline"],
-        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)", "Secondary", ""],
-        "Group": ["", "", "", "", "", "", "Ultratech Secondary"],
+        "Vehicle No": ["V_ONLY_XSWIFT_OFFLINE", "V_ONLY_XSWIFT_ONLINE", "V_BOTH", "V_BLANK_PLANT_OFFLINE", "v_case_test", "V_SECONDARY_PLANT_OFFLINE", "V_BLANK_PLANT_SECONDARY_GROUP", "V_HUB_LABELED_AT_OFFLINE"],
+        "Vehicle Status": ["Offline", "Online", "Idle", "Offline", "Idle", "Offline", "Offline", "Offline"],
+        "Vehicle Reg Plant Name": ["ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "ADITYA CEMENT WORKS_UTCL(P)", "", "ADITYA CEMENT WORKS_UTCL(P)", "Secondary", "", "ADITYA CEMENT WORKS_UTCL(P)"],
+        "Group": ["", "", "", "", "", "", "Ultratech Secondary", ""],
     })
     xswift_path = tmpdir / "xswift.xlsx"
     with pd.ExcelWriter(xswift_path) as w:
@@ -212,10 +212,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # AT "dashboard" sheet
     at_data = pd.DataFrame({
-        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co", "Aditya Raw Material", "Aditya Mines", "Aditya Cement Works"],
-        "Share": ["Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share"],
-        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT", "V_ONLY_AT_NAME_VARIANT", "V_AUX_FLEET_SHOULD_NOT_MATCH", "V_CASE_TEST"],
-        "Status": ["Idle", "Idle", "Idle", "Idle", "Idle", "Idle"],
+        "Company Name": ["Aditya Cement Works", "Aditya Cement Works", "Some Non Primary Co", "Aditya Raw Material", "Aditya Mines", "Aditya Cement Works", "Adityapuram Hub"],
+        "Share": ["Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share", "Veh Share"],
+        "Vehicle": ["V_BOTH", "V_ONLY_AT", "V_NONPRIMARY_ONLY_AT", "V_ONLY_AT_NAME_VARIANT", "V_AUX_FLEET_SHOULD_NOT_MATCH", "V_CASE_TEST", "V_HUB_LABELED_AT_OFFLINE"],
+        "Status": ["Idle", "Idle", "Idle", "Idle", "Idle", "Idle", "Idle"],
     })
     at_path = tmpdir / "at.xlsx"
     at_data.to_excel(at_path, sheet_name="dashboard", index=False)
@@ -249,6 +249,8 @@ with tempfile.TemporaryDirectory() as tmpdir:
          "v_case_test" not in not_in_at and "V_CASE_TEST" not in not_in_swift),
         ("Not in AT EXCLUDES non-matching non-blank plant name vehicle (Secondary-plant over-match fix)",
          "V_SECONDARY_PLANT_OFFLINE" not in not_in_at),
+        ("Not in AT EXCLUDES vehicle present in AT under a hub/regional label (real bug fix: presence-check must use unfiltered AT)",
+         "V_HUB_LABELED_AT_OFFLINE" not in not_in_at),
     ]
     print(f"\n--- Mapping issue checks ---")
     for desc, passed in mapping_checks:

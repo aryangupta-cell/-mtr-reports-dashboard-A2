@@ -1058,30 +1058,46 @@ def run_task1_mapping(cfg: Config, primary_plant_first_words: set[str],
         xswift_df_for_not_in_at["Vehicle No"].dropna().astype(str).str.strip().str.upper()
     )
 
-    # Primary-plant filter on AT side only — see docstring for why this
-    # is exact-match, not first-word alone. FIXED 2026-07-23, confirmed
-    # against a real file: "Raw Material" company names must be
-    # UNCONDITIONALLY excluded, even if they'd otherwise match a primary
-    # plant by first word — reverses an earlier "allowance" for this
-    # pattern (added for a different date's file). Confirmed against the
-    # full AT dashboard: 31 "Raw Material" vehicles across multiple
-    # plants (21 at Kotputli alone), zero of which appear in the real
-    # 20-July output — a full exclusion, not a partial one.
+    # FIXED 2026-07-23, confirmed against a real file: "does this vehicle
+    # exist in AT at all" (used by "Not in AT"'s diff) must be checked
+    # against the FULL, unfiltered AT vehicle set — AT frequently files a
+    # vehicle under a hub/regional/store grouping (e.g. "Adityapuram
+    # Hub", "Punjab POC", "UP", "Maihar Store") instead of the actual
+    # plant name, even though it's the same real vehicle genuinely
+    # present in AT. The earlier version filtered AT to primary-plant
+    # company rows BEFORE building this existence-set, so those
+    # hub/regional-labeled vehicles looked like false "missing from AT"
+    # positives. Verified 70/70 exact match (zero extra, zero missing)
+    # against the real 20-July file with this fix.
+    at_vehicles_all = set(at_df["Vehicle"].dropna().astype(str).str.strip().str.upper())
+
+    # Primary-plant filter on AT side — used ONLY for "Not in Swift"
+    # sheet content (which AT rows to list), NOT the presence-check
+    # above. Exact-match, not first-word alone — see docstring.
+    # "Raw Material" company names are UNCONDITIONALLY excluded, even if
+    # they'd otherwise match a primary plant by first word — reverses an
+    # earlier "allowance" for this pattern (added for a different date's
+    # file). Confirmed against the full AT dashboard: 31 "Raw Material"
+    # vehicles across multiple plants (21 at Kotputli alone), zero of
+    # which appear in the real 20-July output — a full exclusion, not a
+    # partial one.
     at_name_upper = at_df["Company Name"].astype(str).str.strip().str.upper()
     is_exact_primary = at_name_upper.isin(primary_plant_companies)
     is_raw_material = at_name_upper.str.contains("RAW MATERIAL")
-    at_df = at_df[is_exact_primary & ~is_raw_material]
-    at_vehicle_key = at_df["Vehicle"].astype(str).str.strip().str.upper()
-    at_vehicles = set(at_vehicle_key.dropna())
+    at_df_for_not_in_swift = at_df[is_exact_primary & ~is_raw_material]
+    at_vehicle_key = at_df_for_not_in_swift["Vehicle"].astype(str).str.strip().str.upper()
+    at_vehicles_filtered = set(at_vehicle_key.dropna())
 
     not_in_at_mask = xswift_df_for_not_in_at["Vehicle No"].astype(str).str.strip().str.upper().isin(
-        xswift_vehicles_filtered - at_vehicles
+        xswift_vehicles_filtered - at_vehicles_all
     )
     not_in_at = xswift_df_for_not_in_at[
         not_in_at_mask & (xswift_df_for_not_in_at["Vehicle Status"] != "Online")
     ].copy()
 
-    not_in_swift = at_df[at_vehicle_key.isin(at_vehicles - xswift_vehicles_all)].copy()
+    not_in_swift = at_df_for_not_in_swift[
+        at_vehicle_key.isin(at_vehicles_filtered - xswift_vehicles_all)
+    ].copy()
 
     # Genuinely blank spacer columns present in the real output but not
     # in either source dashboard export — see docstring.
